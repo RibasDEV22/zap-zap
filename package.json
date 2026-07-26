@@ -1,21 +1,12 @@
 {
-  "name": "zapzap-server",
-  "version": "3.0.0",
-  "description": "Servidor ultra-leve de mensageria estilo WhatsApp em tempo real com SQLite e WebSockets.",
+  "name": "zapzap-app",
+  "version": "4.0.0",
+  "description": "App de mensageria em tempo real otimizado para Render com WebSockets e SQLite.",
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=400 server.js",
-    "dev": "node --watch --max-old-space-size=400 server.js"
+    "dev": "node --watch server.js"
   },
-  "keywords": [
-    "websocket",
-    "chat",
-    "sqlite",
-    "whatsapp-clone",
-    "realtime"
-  ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.8.0",
     "ws": "^8.18.0"

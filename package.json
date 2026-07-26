@@ -4,14 +4,15 @@
   "description": "App de mensageria em tempo real otimizado para Render com WebSockets e SQLite.",
   "main": "server.js",
   "scripts": {
-    "start": "node --max-old-space-size=400 server.js",
+    "start": "node --max-old-space-size=256 server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.8.0",
     "ws": "^8.18.0"
   },
   "engines": {
-    "node": "20.x"
+    "node": ">=20.0.0"
   }
 }

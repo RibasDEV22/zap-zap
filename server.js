@@ -1,13 +1,13 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
 const { authenticateUser, registerUser } = require('./auth');
-const { stmtSaveMsg, stmtGetHistoryPrivate, db } = require('./db');
+const { stmtSaveMsg, db } = require('./db');
 
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 const activeSockets = new Map();
 
-// Keep-Alive Ping/Pong (Evita desconexão no Render após 55s)
+// Keep-Alive Ping/Pong (Evita desconexão automática no Render após 55s)
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -34,7 +34,6 @@ wss.on('connection', (ws) => {
                     currentUsername = user.username;
                     activeSockets.set(currentUsername, ws);
                     
-                    // Responde sucesso do registro/login para liberar a tela no cliente
                     ws.send(JSON.stringify({ type: 'auth_success', user }));
                     broadcastUserList();
                     break;
@@ -61,7 +60,13 @@ wss.on('connection', (ws) => {
 
                 case 'get_history': {
                     if (!currentUsername || !data.with) return;
-                    const history = stmtGetHistoryPrivate.all(currentUsername, data.with, data.with, currentUsername);
+                    
+                    const history = db.prepare(`
+                        SELECT * FROM messages 
+                        WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
+                        ORDER BY timestamp ASC
+                    `).all(currentUsername, data.with, data.with, currentUsername);
+
                     ws.send(JSON.stringify({
                         type: 'chat_history',
                         with: data.with,
@@ -71,7 +76,7 @@ wss.on('connection', (ws) => {
                 }
 
                 case 'private_message': {
-                    if (!currentUsername) return;
+                    if (!currentUsername || !data.to) return;
                     const msgId = crypto.randomUUID();
                     const timestamp = Date.now();
 
@@ -82,24 +87,29 @@ wss.on('connection', (ws) => {
                     );
 
                     const payload = {
-                        id: msgId, type: 'chat_message',
-                        from: currentUsername, to: data.to,
+                        id: msgId, 
+                        type: 'chat_message',
+                        from: currentUsername, 
+                        to: data.to,
                         mediaType: data.mediaType || 'text',
-                        content: data.content, time: data.time,
+                        content: data.content, 
+                        time: data.time,
                         replyTo: data.replyTo || null
                     };
 
+                    // Envia para o destinatário (se estiver online)
                     const targetWs = activeSockets.get(data.to);
                     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                         targetWs.send(JSON.stringify(payload));
                     }
                     
+                    // Envia de volta para o remetente para confirmar a exibição no chat
                     ws.send(JSON.stringify(payload));
                     break;
                 }
             }
         } catch (err) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: err.message || 'Erro no processamento.' }));
+            ws.send(JSON.stringify({ type: 'auth_error', message: err.message || 'Erro de processamento.' }));
         }
     });
 
@@ -141,4 +151,4 @@ function broadcastUserList() {
     }
 }
 
-console.log(`Servidor iniciado na porta ${PORT}`);
+console.log(`Servidor rodando com sucesso na porta ${PORT}`);

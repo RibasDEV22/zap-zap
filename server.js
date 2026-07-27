@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 const activeSockets = new Map();
 
-// Keep-Alive Ping/Pong (Evita desconexão automática no Render após 55s)
+// Keep-Alive Ping/Pong para manter a conexão ativa (Render / Mobile)
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -97,19 +97,19 @@ wss.on('connection', (ws) => {
                         replyTo: data.replyTo || null
                     };
 
-                    // Envia para o destinatário (se estiver online)
+                    // Envia para o destinatário (se online)
                     const targetWs = activeSockets.get(data.to);
                     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                         targetWs.send(JSON.stringify(payload));
                     }
                     
-                    // Envia de volta para o remetente para confirmar a exibição no chat
+                    // Retorna a confirmação para o remetente
                     ws.send(JSON.stringify(payload));
                     break;
                 }
             }
         } catch (err) {
-            ws.send(JSON.stringify({ type: 'auth_error', message: err.message || 'Erro de processamento.' }));
+            ws.send(JSON.stringify({ type: 'auth_error', message: err.message || 'Erro de processamento no servidor.' }));
         }
     });
 

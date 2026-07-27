@@ -1,13 +1,27 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
 const { authenticateUser, registerUser } = require('./auth');
-const { stmtSaveMsg, stmtGetHistoryPrivate, stmtGetUser } = require('./db');
+const { stmtSaveMsg, stmtGetHistoryPrivate, stmtGetUser, db } = require('./db');
 
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 const activeSockets = new Map();
 
+// Mapeamento preparado para Ping/Pong de Keep-Alive (Render timeout de 55s)
+const interval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wss.on('close', () => clearInterval(interval));
+
 wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     let currentUsername = null;
 
     ws.on('message', async (raw) => {
@@ -20,6 +34,7 @@ wss.on('connection', (ws) => {
                     currentUsername = user.username;
                     activeSockets.set(currentUsername, ws);
                     ws.send(JSON.stringify({ type: 'auth_success', user }));
+                    broadcastUserList();
                     break;
                 }
 
@@ -29,9 +44,27 @@ wss.on('connection', (ws) => {
                         currentUsername = user.username;
                         activeSockets.set(currentUsername, ws);
                         ws.send(JSON.stringify({ type: 'auth_success', user }));
+                        broadcastUserList();
                     } else {
                         ws.send(JSON.stringify({ type: 'auth_error', message: 'Credenciais inválidas' }));
                     }
+                    break;
+                }
+
+                case 'get_users': {
+                    if (!currentUsername) return;
+                    sendUserList(ws);
+                    break;
+                }
+
+                case 'get_history': {
+                    if (!currentUsername || !data.with) return;
+                    const history = stmtGetHistoryPrivate.all(currentUsername, data.with, data.with, currentUsername);
+                    ws.send(JSON.stringify({
+                        type: 'chat_history',
+                        with: data.with,
+                        messages: history
+                    }));
                     break;
                 }
 
@@ -50,13 +83,16 @@ wss.on('connection', (ws) => {
                         id: msgId, type: 'chat_message',
                         from: currentUsername, to: data.to,
                         mediaType: data.mediaType || 'text',
-                        content: data.content, time: data.time
+                        content: data.content, time: data.time,
+                        replyTo: data.replyTo || null
                     };
 
                     const targetWs = activeSockets.get(data.to);
                     if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                         targetWs.send(JSON.stringify(payload));
                     }
+                    
+                    // Confirmação para o próprio remetente
                     ws.send(JSON.stringify(payload));
                     break;
                 }
@@ -67,8 +103,41 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        if (currentUsername) activeSockets.delete(currentUsername);
+        if (currentUsername) {
+            activeSockets.delete(currentUsername);
+            broadcastUserList();
+        }
     });
 });
+
+function getUsersData() {
+    const users = db.prepare('SELECT username, displayName, avatar, role FROM users').all();
+    return users.map(u => ({
+        ...u,
+        online: activeSockets.has(u.username)
+    }));
+}
+
+function sendUserList(ws) {
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'user_list',
+            users: getUsersData()
+        }));
+    }
+}
+
+function broadcastUserList() {
+    const userListPayload = JSON.stringify({
+        type: 'user_list',
+        users: getUsersData()
+    });
+    
+    for (const [_, socket] of activeSockets.entries()) {
+        if (socket.readyState === WebSocket.OPEN) {
+            socket.send(userListPayload);
+        }
+    }
+}
 
 console.log(`Servidor iniciado na porta ${PORT}`);

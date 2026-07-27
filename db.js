@@ -1,6 +1,16 @@
 const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
 
-const db = new Database('zapzap.db');
+// Se estiver no Render e houver um volume persistente em /var/data
+const dbDir = process.env.DATA_DIR || './';
+if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const dbPath = path.join(dbDir, 'zapzap.db');
+const db = new Database(dbPath);
+
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -2000'); // Limita cache a 2MB RAM

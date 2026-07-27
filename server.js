@@ -1,13 +1,13 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
 const { authenticateUser, registerUser } = require('./auth');
-const { stmtSaveMsg, stmtGetHistoryPrivate, stmtGetUser, db } = require('./db');
+const { stmtSaveMsg, stmtGetHistoryPrivate, db } = require('./db');
 
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 const activeSockets = new Map();
 
-// Mapeamento preparado para Ping/Pong de Keep-Alive (Render timeout de 55s)
+// Keep-Alive Ping/Pong (Evita desconexão no Render após 55s)
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -33,6 +33,8 @@ wss.on('connection', (ws) => {
                     const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
                     currentUsername = user.username;
                     activeSockets.set(currentUsername, ws);
+                    
+                    // Responde sucesso do registro/login para liberar a tela no cliente
                     ws.send(JSON.stringify({ type: 'auth_success', user }));
                     broadcastUserList();
                     break;
@@ -46,7 +48,7 @@ wss.on('connection', (ws) => {
                         ws.send(JSON.stringify({ type: 'auth_success', user }));
                         broadcastUserList();
                     } else {
-                        ws.send(JSON.stringify({ type: 'auth_error', message: 'Credenciais inválidas' }));
+                        ws.send(JSON.stringify({ type: 'auth_error', message: 'Usuário ou senha incorretos.' }));
                     }
                     break;
                 }
@@ -92,13 +94,12 @@ wss.on('connection', (ws) => {
                         targetWs.send(JSON.stringify(payload));
                     }
                     
-                    // Confirmação para o próprio remetente
                     ws.send(JSON.stringify(payload));
                     break;
                 }
             }
         } catch (err) {
-            ws.send(JSON.stringify({ type: 'error', message: err.message }));
+            ws.send(JSON.stringify({ type: 'auth_error', message: err.message || 'Erro no processamento.' }));
         }
     });
 

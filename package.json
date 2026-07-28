@@ -1,7 +1,7 @@
 {
   "name": "zapzap-app",
-  "version": "4.0.0",
-  "description": "App de mensageria em tempo real otimizado para Render com WebSockets e SQLite.",
+  "version": "5.0.0",
+  "description": "Chat de grupo em tempo real (Anda Mãe Vamos Mãe) com WebSockets e SQLite.",
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=256 server.js",

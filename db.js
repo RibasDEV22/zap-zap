@@ -2,7 +2,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-// Se estiver no Render e houver um volume persistente em /var/data
+// Se estiver no Render com um Disk persistente, use DATA_DIR (ex: /var/data)
 const dbDir = process.env.DATA_DIR || './';
 if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
@@ -13,7 +13,7 @@ const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
-db.pragma('cache_size = -2000'); // Limita cache a 2MB RAM
+db.pragma('cache_size = -2000'); // ~2MB de cache
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -25,35 +25,49 @@ db.exec(`
         createdAt INTEGER NOT NULL
     );
 
+    -- Chat único de grupo: sem "to_user", toda mensagem é pra todo mundo
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
-        sender TEXT NOT NULL,
-        receiver TEXT,
-        groupId TEXT,
-        mediaType TEXT NOT NULL,
+        from_user TEXT NOT NULL,
+        mediaType TEXT NOT NULL DEFAULT 'text',
         content TEXT NOT NULL,
         replyTo TEXT,
         time TEXT NOT NULL,
         timestamp INTEGER NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 `);
 
-const stmtRegister = db.prepare('INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)');
+// Avatares NÃO ficam mais na tabela de mensagens nem são reenviados
+// em cada broadcast de user_list — evita inchar payloads e o banco.
+
+const stmtRegister = db.prepare(
+    'INSERT INTO users (username, password, displayName, avatar, role, createdAt) VALUES (?, ?, ?, ?, ?, ?)'
+);
+
 const stmtGetUser = db.prepare('SELECT * FROM users WHERE username = ?');
-const stmtSaveMsg = db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 
-const stmtGetHistoryPrivate = db.prepare(`
-    SELECT * FROM (
-        SELECT * FROM messages 
-        WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?)
-        ORDER BY timestamp DESC LIMIT 50
-    ) ORDER BY timestamp ASC
+const stmtSaveMsg = db.prepare(
+    'INSERT INTO messages (id, from_user, mediaType, content, replyTo, time, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)'
+);
+
+// Só traz as últimas N mensagens do grupo (histórico não deve crescer sem limite na tela)
+const stmtGetHistory = db.prepare(`
+    SELECT m.*, u.displayName, u.avatar
+    FROM messages m
+    LEFT JOIN users u ON u.username = m.from_user
+    ORDER BY m.timestamp DESC
+    LIMIT ?
 `);
+
+const stmtGetAllUsers = db.prepare('SELECT username, displayName, avatar, role FROM users');
 
 module.exports = {
     db,
     stmtRegister,
     stmtGetUser,
     stmtSaveMsg,
-    stmtGetHistoryPrivate
+    stmtGetHistory,
+    stmtGetAllUsers
 };

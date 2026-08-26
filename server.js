@@ -46,7 +46,7 @@ if (RENDER_URL) {
 // --- SERVIDOR WEBSOCKET ---
 const wss = new WebSocketServer({ server });
 
-// Keep-alive WebSocket (detecta desconexões repentinas)
+// Keep-alive WebSocket a nível de protocolo (detecta desconexões repentinas)
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
@@ -69,13 +69,18 @@ function sendError(ws, message) {
 }
 
 function getUsersData() {
-  return stmtGetAllUsers.all().map(u => ({
-    username: u.username,
-    displayName: u.displayName,
-    avatar: u.avatar,
-    role: u.role,
-    online: activeSockets.has(u.username)
-  }));
+  try {
+    return stmtGetAllUsers.all().map(u => ({
+      username: u.username,
+      displayName: u.displayName,
+      avatar: u.avatar,
+      role: u.role,
+      online: activeSockets.has(u.username)
+    }));
+  } catch (err) {
+    console.error('[DB Error] Falha ao buscar lista de usuários:', err.message);
+    return [];
+  }
 }
 
 function broadcastUserList() {
@@ -102,7 +107,21 @@ wss.on('connection', (ws) => {
 
     try {
       switch (data.type) {
+        // TRATAMENTO DO PING DO FRONTEND
+        case 'ping': {
+          ws.isAlive = true;
+          return send(ws, { type: 'pong' });
+        }
+
+        case 'pong': {
+          ws.isAlive = true;
+          break;
+        }
+
         case 'register': {
+          if (!data.username || !data.password) {
+            return sendError(ws, 'Usuário e senha são obrigatórios.');
+          }
           const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
           currentUsername = user.username;
 
@@ -114,6 +133,9 @@ wss.on('connection', (ws) => {
         }
 
         case 'login': {
+          if (!data.username || !data.password) {
+            return sendError(ws, 'Usuário e senha são obrigatórios.');
+          }
           const user = await authenticateUser(data.username, data.password);
           currentUsername = user.username;
 

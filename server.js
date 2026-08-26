@@ -1,15 +1,25 @@
 const http = require('http');
+const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
 const { authenticateUser, registerUser, AuthError } = require('./auth');
 const { stmtGetAllUsers } = require('./db');
 
+// Tenta carregar a função de backup caso o arquivo driveBackup.js exista
+let uploadDatabaseBackup = null;
+try {
+  uploadDatabaseBackup = require('./driveBackup').uploadDatabaseBackup;
+} catch {
+  console.log('[Info] Módulo driveBackup.js não encontrado. Backups para o Google Drive desativados.');
+}
+
 const PORT = process.env.PORT || 8080;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+const DB_PATH = path.join(__dirname, 'database.db'); // Caminho do banco SQLite
 
-// Rastreio de sessões: username -> { ws, displayName, isBusy }
+// Map para rastreamento de sessões: username -> { ws, displayName, isBusy, callTarget }
 const activeSockets = new Map();
 
-// --- SERVIDOR HTTP (Rotas HTTP e Keep-Alive) ---
+// --- SERVIDOR HTTP (Rotas /ping, /health e Keep-Alive) ---
 const server = http.createServer((req, res) => {
   if (req.url === '/ping') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -30,11 +40,11 @@ const server = http.createServer((req, res) => {
   res.end('Servidor WebSocket "Anda Mãe Vamos Mãe" rodando.');
 });
 
-// Ajustes TCP para evitar encerramento prematuro de socket pelo proxy do Render
+// Configurações de Keep-Alive TCP contra timeouts do proxy do Render
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
-// Self-ping quinzenal HTTP para impedir suspensão do contêiner no Render
+// Self-ping HTTP a cada 10 minutos para impedir suspensão no plano gratuito do Render
 if (RENDER_URL) {
   const TEN_MINUTES = 10 * 60 * 1000;
   setInterval(async () => {
@@ -47,10 +57,21 @@ if (RENDER_URL) {
   }, TEN_MINUTES);
 }
 
+// Rotina de Backup no Google Drive (Executa ao iniciar e a cada 6 horas)
+if (typeof uploadDatabaseBackup === 'function') {
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  
+  // Executa o primeiro backup 30 segundos após iniciar
+  setTimeout(() => uploadDatabaseBackup(DB_PATH), 30000);
+  
+  // Repete o backup a cada 6 horas
+  setInterval(() => uploadDatabaseBackup(DB_PATH), SIX_HOURS);
+}
+
 // --- SERVIDOR WEBSOCKET ---
 const wss = new WebSocketServer({ server });
 
-// Protocol Ping/Pong interno do WebSocket
+// Monitoramento de latência e heartbeat
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
@@ -97,6 +118,24 @@ function broadcastUserList() {
   }
 }
 
+function endUserCall(username) {
+  const session = activeSockets.get(username);
+  if (!session) return;
+
+  const targetUsername = session.callTarget;
+  session.isBusy = false;
+  session.callTarget = null;
+
+  if (targetUsername) {
+    const targetSession = activeSockets.get(targetUsername);
+    if (targetSession) {
+      targetSession.isBusy = false;
+      targetSession.callTarget = null;
+      send(targetSession.ws, { type: 'call_ended', from: username });
+    }
+  }
+}
+
 // --- GERENCIAMENTO DE CONEXÕES ---
 wss.on('connection', (ws) => {
   ws.isAlive = true;
@@ -131,7 +170,12 @@ wss.on('connection', (ws) => {
           const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
           currentUsername = user.username;
 
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false });
+          activeSockets.set(currentUsername, { 
+            ws, 
+            displayName: user.displayName, 
+            isBusy: false, 
+            callTarget: null 
+          });
 
           send(ws, { type: 'auth_success', user });
           broadcastUserList();
@@ -145,14 +189,20 @@ wss.on('connection', (ws) => {
           const user = await authenticateUser(data.username, data.password);
           currentUsername = user.username;
 
-          // Se já houver sessão ativa em outro cliente, desconecta o antigo de forma limpa
+          // Se o usuário já estava logado, fecha o socket anterior
           const existingSession = activeSockets.get(currentUsername);
           if (existingSession && existingSession.ws !== ws) {
+            endUserCall(currentUsername);
             send(existingSession.ws, { type: 'auth_error', message: 'Sessão iniciada em outro local.' });
             existingSession.ws.close();
           }
 
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false });
+          activeSockets.set(currentUsername, { 
+            ws, 
+            displayName: user.displayName, 
+            isBusy: false, 
+            callTarget: null 
+          });
 
           send(ws, { type: 'auth_success', user });
           broadcastUserList();
@@ -178,7 +228,10 @@ wss.on('connection', (ws) => {
           }
 
           const callerSession = activeSockets.get(currentUsername);
-          if (callerSession) callerSession.isBusy = true;
+          if (callerSession) {
+            callerSession.isBusy = true;
+            callerSession.callTarget = data.callee;
+          }
 
           send(calleeSession.ws, {
             type: 'call_incoming',
@@ -194,9 +247,15 @@ wss.on('connection', (ws) => {
           const callerSession = activeSockets.get(data.caller);
           const answererSession = activeSockets.get(currentUsername);
 
-          if (answererSession) answererSession.isBusy = true;
+          if (answererSession) {
+            answererSession.isBusy = true;
+            answererSession.callTarget = data.caller;
+          }
 
           if (callerSession) {
+            callerSession.isBusy = true;
+            callerSession.callTarget = currentUsername;
+
             send(callerSession.ws, {
               type: 'call_answered',
               answerer: currentUsername,
@@ -221,18 +280,7 @@ wss.on('connection', (ws) => {
 
         case 'call_end': {
           if (!currentUsername) return;
-
-          const mySession = activeSockets.get(currentUsername);
-          if (mySession) mySession.isBusy = false;
-
-          const targetSession = activeSockets.get(data.to);
-          if (targetSession) {
-            targetSession.isBusy = false;
-            send(targetSession.ws, {
-              type: 'call_ended',
-              from: currentUsername
-            });
-          }
+          endUserCall(currentUsername);
           break;
         }
 
@@ -252,8 +300,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (currentUsername) {
       const session = activeSockets.get(currentUsername);
-      // Garante que só remove do Map se a socket fechada for a socket dona da sessão atual
       if (session && session.ws === ws) {
+        endUserCall(currentUsername);
         activeSockets.delete(currentUsername);
         broadcastUserList();
       }

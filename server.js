@@ -1,10 +1,18 @@
+const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
 const { authenticateUser, registerUser, AuthError } = require('./auth');
 const { stmtGetAllUsers } = require('./db');
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocketServer({ port: PORT });
+
+// Cria um servidor HTTP para o Render gerenciar a porta corretamente
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Servidor WebSocket Ok\n');
+});
+
+const wss = new WebSocketServer({ server });
 
 // username -> ws
 const activeSockets = new Map();
@@ -95,7 +103,6 @@ wss.on('connection', (ws) => {
                     break;
                 }
 
-                // CALL SIGNALING (WebRTC via servidor)
                 case 'call_initiate': {
                     if (!currentUsername) return sendError(ws, 'Você precisa estar logado.');
                     const calleeWs = activeSockets.get(data.callee);
@@ -176,4 +183,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-console.log(`🎉 Servidor "Anda Mãe Vamos Mãe" rodando na porta ${PORT}`);
+server.listen(PORT, () => {
+    console.log(`🎉 Servidor "Anda Mãe Vamos Mãe" rodando na porta ${PORT}`);
+});

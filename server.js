@@ -6,10 +6,10 @@ const { stmtGetAllUsers } = require('./db');
 const PORT = process.env.PORT || 8080;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 
-// Map para rastrear conexões ativas: username -> { ws, displayName }
+// Rastreio de sessões: username -> { ws, displayName, isBusy }
 const activeSockets = new Map();
 
-// --- SERVIDOR HTTP (Rotas /ping, /health e Render Keep-Alive) ---
+// --- SERVIDOR HTTP (Rotas HTTP e Keep-Alive) ---
 const server = http.createServer((req, res) => {
   if (req.url === '/ping') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -27,18 +27,22 @@ const server = http.createServer((req, res) => {
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Servidor WebSocket "Anda Mãe Vamos Mãe" em execução.');
+  res.end('Servidor WebSocket "Anda Mãe Vamos Mãe" rodando.');
 });
 
-// Auto-ping interno para evitar que o Render entre em modo de suspensão
+// Ajustes TCP para evitar encerramento prematuro de socket pelo proxy do Render
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+// Self-ping quinzenal HTTP para impedir suspensão do contêiner no Render
 if (RENDER_URL) {
   const TEN_MINUTES = 10 * 60 * 1000;
   setInterval(async () => {
     try {
       await fetch(`${RENDER_URL}/ping`);
-      console.log('[Keep-Alive] Ping enviado ao Render com sucesso.');
+      console.log('[Keep-Alive] Ping HTTP enviado com sucesso.');
     } catch (err) {
-      console.error('[Keep-Alive] Falha ao enviar ping:', err.message);
+      console.error('[Keep-Alive] Falha ao enviar ping HTTP:', err.message);
     }
   }, TEN_MINUTES);
 }
@@ -46,18 +50,21 @@ if (RENDER_URL) {
 // --- SERVIDOR WEBSOCKET ---
 const wss = new WebSocketServer({ server });
 
-// Keep-alive WebSocket a nível de protocolo (detecta desconexões repentinas)
+// Protocol Ping/Pong interno do WebSocket
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
+    if (ws.isAlive === false) {
+      console.log('[WS] Fechando conexão inativa.');
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping();
   });
-}, 30000);
+}, 45000);
 
 wss.on('close', () => clearInterval(pingInterval));
 
-// --- FUNÇÕES AUXILIARES ---
+// --- HELPER FUNCTIONS ---
 function send(ws, payload) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(payload));
@@ -78,7 +85,7 @@ function getUsersData() {
       online: activeSockets.has(u.username)
     }));
   } catch (err) {
-    console.error('[DB Error] Falha ao buscar lista de usuários:', err.message);
+    console.error('[DB Error] Falha ao listar usuários:', err.message);
     return [];
   }
 }
@@ -107,7 +114,6 @@ wss.on('connection', (ws) => {
 
     try {
       switch (data.type) {
-        // TRATAMENTO DO PING DO FRONTEND
         case 'ping': {
           ws.isAlive = true;
           return send(ws, { type: 'pong' });
@@ -125,7 +131,7 @@ wss.on('connection', (ws) => {
           const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
           currentUsername = user.username;
 
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName });
+          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false });
 
           send(ws, { type: 'auth_success', user });
           broadcastUserList();
@@ -139,14 +145,14 @@ wss.on('connection', (ws) => {
           const user = await authenticateUser(data.username, data.password);
           currentUsername = user.username;
 
-          // Se o usuário já estiver logado em outra aba/dispositivo, desconecta o antigo
+          // Se já houver sessão ativa em outro cliente, desconecta o antigo de forma limpa
           const existingSession = activeSockets.get(currentUsername);
           if (existingSession && existingSession.ws !== ws) {
-            send(existingSession.ws, { type: 'auth_error', message: 'Você entrou em outro dispositivo.' });
+            send(existingSession.ws, { type: 'auth_error', message: 'Sessão iniciada em outro local.' });
             existingSession.ws.close();
           }
 
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName });
+          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false });
 
           send(ws, { type: 'auth_success', user });
           broadcastUserList();
@@ -154,20 +160,25 @@ wss.on('connection', (ws) => {
         }
 
         case 'get_users': {
-          if (!currentUsername) return sendError(ws, 'Sessão não autenticada.');
+          if (!currentUsername) return sendError(ws, 'Não autenticado.');
           send(ws, { type: 'user_list', users: getUsersData() });
           break;
         }
 
         case 'call_initiate': {
-          if (!currentUsername) return sendError(ws, 'Você precisa estar logado.');
+          if (!currentUsername) return sendError(ws, 'Não autenticado.');
 
           const calleeSession = activeSockets.get(data.callee);
           if (!calleeSession) {
-            return send(ws, { type: 'call_error', message: 'Usuário indisponível ou offline.' });
+            return send(ws, { type: 'call_error', message: 'Usuário offline ou indisponível.' });
+          }
+
+          if (calleeSession.isBusy) {
+            return send(ws, { type: 'call_error', message: 'Usuário já está em uma chamada.' });
           }
 
           const callerSession = activeSockets.get(currentUsername);
+          if (callerSession) callerSession.isBusy = true;
 
           send(calleeSession.ws, {
             type: 'call_incoming',
@@ -181,6 +192,10 @@ wss.on('connection', (ws) => {
         case 'call_answer': {
           if (!currentUsername) return;
           const callerSession = activeSockets.get(data.caller);
+          const answererSession = activeSockets.get(currentUsername);
+
+          if (answererSession) answererSession.isBusy = true;
+
           if (callerSession) {
             send(callerSession.ws, {
               type: 'call_answered',
@@ -206,8 +221,13 @@ wss.on('connection', (ws) => {
 
         case 'call_end': {
           if (!currentUsername) return;
+
+          const mySession = activeSockets.get(currentUsername);
+          if (mySession) mySession.isBusy = false;
+
           const targetSession = activeSockets.get(data.to);
           if (targetSession) {
+            targetSession.isBusy = false;
             send(targetSession.ws, {
               type: 'call_ended',
               from: currentUsername
@@ -224,7 +244,7 @@ wss.on('connection', (ws) => {
         sendError(ws, err.message);
       } else {
         console.error(`[Erro de Processamento] Usuário ${currentUsername || 'Anônimo'}:`, err);
-        sendError(ws, 'Erro interno no servidor.');
+        sendError(ws, 'Erro interno do servidor.');
       }
     }
   });
@@ -232,6 +252,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (currentUsername) {
       const session = activeSockets.get(currentUsername);
+      // Garante que só remove do Map se a socket fechada for a socket dona da sessão atual
       if (session && session.ws === ws) {
         activeSockets.delete(currentUsername);
         broadcastUserList();
@@ -244,13 +265,13 @@ wss.on('connection', (ws) => {
   });
 });
 
-// --- ENCERRAMENTO GRACIOSO (Graceful Shutdown) ---
+// Encerramento Gracioso
 const handleShutdown = () => {
-  console.log('Encerrando conexões...');
+  console.log('Encerrando servidor...');
   clearInterval(pingInterval);
   wss.close(() => {
     server.close(() => {
-      console.log('Servidor finalizado com sucesso.');
+      console.log('Servidor encerrado.');
       process.exit(0);
     });
   });
@@ -259,7 +280,6 @@ const handleShutdown = () => {
 process.on('SIGTERM', handleShutdown);
 process.on('SIGINT', handleShutdown);
 
-// --- INICIALIZAÇÃO ---
 server.listen(PORT, () => {
   console.log(`🚀 Servidor "Anda Mãe Vamos Mãe" rodando na porta ${PORT}`);
 });

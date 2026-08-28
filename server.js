@@ -1,20 +1,19 @@
 const http = require('http');
-const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
-const { authenticateUser, registerUser, AuthError } = require('./auth');
-const { stmtGetAllUsers } = require('./db');
+const { authenticateUser, registerUser } = require('./auth');
+const { stmtGetAllUsers, stmtInsertMessage, stmtGetChatHistory, dbPath } = require('./db');
 
 let uploadDatabaseBackup = null;
 try {
   uploadDatabaseBackup = require('./driveBackup').uploadDatabaseBackup;
 } catch {
-  console.log('[Info] driveBackup.js não encontrado.');
+  console.log('[Info] driveBackup.js não configurado.');
 }
 
 const PORT = process.env.PORT || 8080;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
-const DB_PATH = path.join(__dirname, 'database.db');
 
+// Mapeamento de usuários ativos: username => { ws, displayName, isBusy, callTarget }
 const activeSockets = new Map();
 
 const server = http.createServer((req, res) => {
@@ -31,31 +30,34 @@ const server = http.createServer((req, res) => {
     }));
   }
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Servidor ZapZap WebRTC / Chat Ativo');
+  res.end('Servidor ZapZap - Sinalização WebRTC e Chat de Voz/Texto');
 });
 
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
+// Auto-ping para manter o Render acordado
 if (RENDER_URL) {
   setInterval(async () => {
     try { await fetch(`${RENDER_URL}/ping`); } catch (err) {}
   }, 10 * 60 * 1000);
 }
 
+// Backup no Google Drive a cada 6 horas se disponível
 if (typeof uploadDatabaseBackup === 'function') {
-  setInterval(() => uploadDatabaseBackup(DB_PATH), 6 * 60 * 60 * 1000);
+  setInterval(() => uploadDatabaseBackup(dbPath), 6 * 60 * 60 * 1000);
 }
 
 const wss = new WebSocketServer({ server });
 
+// Verificação de pulso do WebSocket (Ping/Pong)
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
     ws.isAlive = false;
     ws.ping();
   });
-}, 45000);
+}, 30000);
 
 wss.on('close', () => clearInterval(pingInterval));
 
@@ -84,9 +86,13 @@ function getUsersData() {
 }
 
 function broadcastUserList() {
-  const payload = { type: 'user_list', users: getUsersData() };
+  const users = getUsersData();
+  const payloadUsers = { type: 'users_list', users };
+  const payloadContacts = { type: 'contacts_list', users };
+
   for (const { ws } of activeSockets.values()) {
-    send(ws, payload);
+    send(ws, payloadUsers);
+    send(ws, payloadContacts);
   }
 }
 
@@ -118,7 +124,7 @@ wss.on('connection', (ws) => {
     try {
       data = JSON.parse(raw.toString());
     } catch {
-      return sendError(ws, 'JSON Inválido');
+      return sendError(ws, 'Mensagem com formato JSON inválido.');
     }
 
     try {
@@ -129,42 +135,70 @@ wss.on('connection', (ws) => {
 
         case 'login': {
           const user = await authenticateUser(data.username, data.password);
+          
+          // Encerra sessão antiga se o usuário já estiver conectado em outro dispositivo
+          if (activeSockets.has(user.username)) {
+            const oldSocket = activeSockets.get(user.username).ws;
+            send(oldSocket, { type: 'auth_error', message: 'Nova conexão realizada em outro dispositivo.' });
+            oldSocket.close();
+          }
+
           currentUsername = user.username;
           activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false, callTarget: null });
-          send(ws, { type: 'auth_success', user });
+
+          send(ws, { type: 'auth_success', user, credentials: { username: data.username, password: data.password } });
           broadcastUserList();
           break;
         }
 
         case 'register': {
           const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
+          
           currentUsername = user.username;
           activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false, callTarget: null });
-          send(ws, { type: 'auth_success', user });
+
+          send(ws, { type: 'auth_success', user, credentials: { username: data.username, password: data.password } });
           broadcastUserList();
           break;
         }
 
-        // CHAT DE MENSAGENS E2E SEGURO
+        case 'get_contacts':
+        case 'get_users': {
+          send(ws, { type: 'contacts_list', users: getUsersData() });
+          break;
+        }
+
+        // --- SISTEMA DE MENSAGENS E HISTÓRICO ---
         case 'chat_message': {
-          if (!currentUsername) return;
-          const targetSession = activeSockets.get(data.to);
+          if (!currentUsername || !data.to || !data.text) return;
+          
+          const timestamp = Date.now();
+          stmtInsertMessage.run(currentUsername, data.to, data.text.trim(), timestamp);
+
           const payload = {
             type: 'chat_message',
             from: currentUsername,
-            text: data.text,
-            timestamp: Date.now()
+            to: data.to,
+            text: data.text.trim(),
+            timestamp
           };
 
+          const targetSession = activeSockets.get(data.to);
           if (targetSession) {
             send(targetSession.ws, payload);
-          } else {
-            // Notificação de mensagem offline
-            console.log(`[Offline Message] Usuário ${data.to} está offline.`);
           }
           break;
         }
 
+        case 'get_chat_history': {
+          if (!currentUsername || !data.withUser) return;
+          
+          const history = stmtGetChatHistory.all(currentUsername, data.withUser, data.withUser, currentUsername);
+          send(ws, { type: 'chat_history', withUser: data.withUser, messages: history });
+          break;
+        }
+
+        // --- PROTOCOLO DE SINALIZAÇÃO WEBRTC (LIGAÇÕES DE VOZ) ---
         case 'call_initiate': {
           if (!currentUsername) return;
           const calleeSession = activeSockets.get(data.callee);
@@ -175,7 +209,7 @@ wss.on('connection', (ws) => {
           }
 
           if (calleeSession.isBusy) {
-            return send(ws, { type: 'call_error', message: 'Usuário ocupado.' });
+            return send(ws, { type: 'call_error', message: 'O usuário está ocupado em outra chamada.' });
           }
 
           callerSession.isBusy = true;
@@ -208,6 +242,17 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'call_reject': {
+          if (!currentUsername) return;
+          const callerSession = activeSockets.get(data.caller);
+          if (callerSession) {
+            callerSession.isBusy = false;
+            callerSession.callTarget = null;
+            send(callerSession.ws, { type: 'call_rejected', from: currentUsername });
+          }
+          break;
+        }
+
         case 'call_ice_candidate': {
           if (!currentUsername) return;
           const targetSession = activeSockets.get(data.to);
@@ -224,7 +269,7 @@ wss.on('connection', (ws) => {
         }
       }
     } catch (err) {
-      sendError(ws, err.message || 'Erro no servidor.');
+      sendError(ws, err.message || 'Erro interno no servidor.');
     }
   });
 
@@ -237,4 +282,4 @@ wss.on('connection', (ws) => {
   });
 });
 
-server.listen(PORT, () => console.log(`🚀 Servidor Ativo na porta ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Servidor ZapZap ativo e escutando na porta ${PORT}`));

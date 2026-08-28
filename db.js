@@ -2,7 +2,6 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-// Usar disco persistente do Render se existir, senão ./
 const dbDir = process.env.DATA_DIR || './';
 if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
@@ -13,8 +12,9 @@ const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
-db.pragma('cache_size = -2000'); // ~2MB de cache
+db.pragma('cache_size = -2000'); // ~2MB cache
 
+// TABELAS DE USUÁRIOS E MENSAGENS
 db.exec(`
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
@@ -24,16 +24,41 @@ db.exec(`
         role TEXT DEFAULT 'Membro',
         createdAt INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        FOREIGN KEY(sender) REFERENCES users(username),
+        FOREIGN KEY(receiver) REFERENCES users(username)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages(sender, receiver);
 `);
 
+// PREPARED STATEMENTS - USUÁRIOS
 const stmtRegister = db.prepare(
     'INSERT INTO users (username, password, displayName, avatar, role, createdAt) VALUES (?, ?, ?, ?, ?, ?)'
 );
-
 const stmtGetUser = db.prepare('SELECT * FROM users WHERE username = ?');
 const stmtGetAllUsers = db.prepare('SELECT username, displayName, avatar, role FROM users');
 
-// --- FUNÇÃO DE BACKUP VIA DISCORD WEBHOOK ---
+// PREPARED STATEMENTS - MENSAGENS
+const stmtInsertMessage = db.prepare(
+    'INSERT INTO messages (sender, receiver, content, timestamp) VALUES (?, ?, ?, ?)'
+);
+
+const stmtGetChatHistory = db.prepare(`
+    SELECT id, sender, receiver, content, timestamp 
+    FROM messages 
+    WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?)
+    ORDER BY timestamp ASC 
+    LIMIT 100
+`);
+
+// BACKUP AUTOMÁTICO VIA DISCORD WEBHOOK
 async function sendDiscordBackup() {
     const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
     if (!webhookUrl) return;
@@ -50,24 +75,22 @@ async function sendDiscordBackup() {
             content: `📦 **Backup do Banco de Dados** | ${new Date().toLocaleString('pt-BR')}`
         }));
 
-        await fetch(webhookUrl, {
-            method: 'POST',
-            body: formData
-        });
-
-        console.log('[Backup Discord] Banco enviado com sucesso.');
+        await fetch(webhookUrl, { method: 'POST', body: formData });
+        console.log('[Backup Discord] Banco de dados exportado com sucesso.');
     } catch (err) {
         console.error('[Backup Discord Error]', err.message);
     }
 }
 
-// Envia um backup a cada 6 horas (21.600.000 ms)
 setInterval(sendDiscordBackup, 6 * 60 * 60 * 1000);
 
 module.exports = {
     db,
+    dbPath,
     stmtRegister,
     stmtGetUser,
     stmtGetAllUsers,
+    stmtInsertMessage,
+    stmtGetChatHistory,
     sendDiscordBackup
 };

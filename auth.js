@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const { stmtRegister, stmtGetUser, db } = require('./db');
 
 const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
-const MAX_AVATAR_SIZE = 300 * 1024; // ~300KB em base64, evita fotos gigantes travando o banco/rede
+const MAX_AVATAR_SIZE = 400 * 1024; // ~400KB em base64
 
 class AuthError extends Error {}
 
@@ -10,10 +10,10 @@ function validateCredentials(username, password) {
     const cleanUser = (username || '').toLowerCase().trim();
 
     if (!USERNAME_REGEX.test(cleanUser)) {
-        throw new AuthError('Usuário deve ter 3-20 caracteres (letras minúsculas, números e _).');
+        throw new AuthError('Usuário deve ter entre 3 e 20 caracteres (apenas letras minúsculas, números e _).');
     }
     if (!password || password.length < 4) {
-        throw new AuthError('Senha deve ter no mínimo 4 caracteres.');
+        throw new AuthError('A senha deve ter no mínimo 4 caracteres.');
     }
     return cleanUser;
 }
@@ -27,7 +27,7 @@ async function registerUser(username, password, displayName, avatar) {
 
     const existing = stmtGetUser.get(cleanUser);
     if (existing) {
-        throw new AuthError('Esse nome de usuário já está em uso.');
+        throw new AuthError('Este nome de usuário já está em uso.');
     }
 
     const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;

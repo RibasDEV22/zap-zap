@@ -14,7 +14,6 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('cache_size = -4000');
 
-// Schema + migrations leves
 db.exec(`
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
@@ -22,6 +21,7 @@ db.exec(`
         displayName TEXT NOT NULL,
         avatar TEXT,
         role TEXT DEFAULT 'Membro',
+        bio TEXT DEFAULT '',
         createdAt INTEGER NOT NULL
     );
 
@@ -31,10 +31,12 @@ db.exec(`
         receiver TEXT NOT NULL,
         content TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
-        msg_type TEXT DEFAULT 'text',          -- text | image | audio | video | file
-        media_meta TEXT,                       -- JSON: {name, mime, size, duration?}
-        deleted_for TEXT DEFAULT '',           -- CSV de usernames que apagaram pra si
-        deleted_for_all INTEGER DEFAULT 0,     -- 1 = apagada para todos
+        msg_type TEXT DEFAULT 'text',
+        media_meta TEXT,
+        deleted_for TEXT DEFAULT '',
+        deleted_for_all INTEGER DEFAULT 0,
+        reply_to INTEGER,
+        edited INTEGER DEFAULT 0,
         FOREIGN KEY(sender) REFERENCES users(username),
         FOREIGN KEY(receiver) REFERENCES users(username)
     );
@@ -43,44 +45,52 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(timestamp);
 `);
 
-// Migration segura para DBs antigos
+// Migrations seguras
 try {
+    const userCols = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+    if (!userCols.includes('bio')) {
+        db.exec(`ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''`);
+    }
+
     const cols = db.prepare("PRAGMA table_info(messages)").all().map(c => c.name);
-    if (!cols.includes('msg_type')) {
-        db.exec(`ALTER TABLE messages ADD COLUMN msg_type TEXT DEFAULT 'text'`);
-    }
-    if (!cols.includes('media_meta')) {
-        db.exec(`ALTER TABLE messages ADD COLUMN media_meta TEXT`);
-    }
-    if (!cols.includes('deleted_for')) {
-        db.exec(`ALTER TABLE messages ADD COLUMN deleted_for TEXT DEFAULT ''`);
-    }
-    if (!cols.includes('deleted_for_all')) {
-        db.exec(`ALTER TABLE messages ADD COLUMN deleted_for_all INTEGER DEFAULT 0`);
-    }
+    const addCol = (name, def) => {
+        if (!cols.includes(name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${def}`);
+    };
+    addCol('msg_type', "TEXT DEFAULT 'text'");
+    addCol('media_meta', 'TEXT');
+    addCol('deleted_for', "TEXT DEFAULT ''");
+    addCol('deleted_for_all', 'INTEGER DEFAULT 0');
+    addCol('reply_to', 'INTEGER');
+    addCol('edited', 'INTEGER DEFAULT 0');
 } catch (e) {
-    console.warn('[DB] Migration warning:', e.message);
+    console.warn('[DB] Migration:', e.message);
 }
 
 const stmtRegister = db.prepare(
-    'INSERT INTO users (username, password, displayName, avatar, role, createdAt) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO users (username, password, displayName, avatar, role, bio, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)'
 );
 const stmtGetUser = db.prepare('SELECT * FROM users WHERE username = ?');
-const stmtGetAllUsers = db.prepare('SELECT username, displayName, avatar, role FROM users');
+const stmtGetAllUsers = db.prepare('SELECT username, displayName, avatar, role, bio FROM users');
+const stmtUpdateProfile = db.prepare(
+    'UPDATE users SET displayName = ?, avatar = ?, bio = ? WHERE username = ?'
+);
 
 const stmtInsertMessage = db.prepare(`
-    INSERT INTO messages (sender, receiver, content, timestamp, msg_type, media_meta)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (sender, receiver, content, timestamp, msg_type, media_meta, reply_to)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
 const stmtGetChatHistory = db.prepare(`
-    SELECT id, sender, receiver, content, timestamp, msg_type, media_meta, deleted_for, deleted_for_all
+    SELECT id, sender, receiver, content, timestamp, msg_type, media_meta,
+           deleted_for, deleted_for_all, reply_to, edited
     FROM messages
     WHERE ((sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?))
       AND deleted_for_all = 0
     ORDER BY timestamp ASC
-    LIMIT 150
+    LIMIT 200
 `);
+
+const stmtGetMessageById = db.prepare('SELECT * FROM messages WHERE id = ?');
 
 const stmtSoftDeleteForUser = db.prepare(`
     UPDATE messages
@@ -114,11 +124,15 @@ const stmtDeleteConversationForAll = db.prepare(`
       AND sender = ?
 `);
 
-// Backup Discord
+const stmtEditMessage = db.prepare(`
+    UPDATE messages SET content = ?, edited = 1
+    WHERE id = ? AND sender = ? AND msg_type = 'text'
+      AND (? - timestamp) <= 300000
+`);
+
 async function sendDiscordBackup() {
     const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
     if (!webhookUrl) return;
-
     try {
         if (!fs.existsSync(dbPath)) return;
         const fileBuffer = fs.readFileSync(dbPath);
@@ -126,28 +140,21 @@ async function sendDiscordBackup() {
         const formData = new FormData();
         formData.append('file', blob, 'zapzap_backup.db');
         formData.append('payload_json', JSON.stringify({
-            content: `📦 **Backup do Banco de Dados** | ${new Date().toLocaleString('pt-BR')}`
+            content: `📦 **Backup** | ${new Date().toLocaleString('pt-BR')}`
         }));
         await fetch(webhookUrl, { method: 'POST', body: formData });
-        console.log('[Backup Discord] Banco de dados exportado com sucesso.');
     } catch (err) {
-        console.error('[Backup Discord Error]', err.message);
+        console.error('[Backup]', err.message);
     }
 }
 
 setInterval(sendDiscordBackup, 6 * 60 * 60 * 1000);
 
 module.exports = {
-    db,
-    dbPath,
-    stmtRegister,
-    stmtGetUser,
-    stmtGetAllUsers,
-    stmtInsertMessage,
-    stmtGetChatHistory,
-    stmtSoftDeleteForUser,
-    stmtDeleteForAll,
-    stmtDeleteConversationForUser,
-    stmtDeleteConversationForAll,
-    sendDiscordBackup
+    db, dbPath,
+    stmtRegister, stmtGetUser, stmtGetAllUsers, stmtUpdateProfile,
+    stmtInsertMessage, stmtGetChatHistory, stmtGetMessageById,
+    stmtSoftDeleteForUser, stmtDeleteForAll,
+    stmtDeleteConversationForUser, stmtDeleteConversationForAll,
+    stmtEditMessage, sendDiscordBackup
 };

@@ -1,285 +1,446 @@
 const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const { authenticateUser, registerUser } = require('./auth');
-const { stmtGetAllUsers, stmtInsertMessage, stmtGetChatHistory, dbPath } = require('./db');
+const {
+    stmtGetAllUsers,
+    stmtInsertMessage,
+    stmtGetChatHistory,
+    stmtSoftDeleteForUser,
+    stmtDeleteForAll,
+    stmtDeleteConversationForUser,
+    stmtDeleteConversationForAll,
+    dbPath
+} = require('./db');
 
 let uploadDatabaseBackup = null;
 try {
-  uploadDatabaseBackup = require('./driveBackup').uploadDatabaseBackup;
+    uploadDatabaseBackup = require('./driveBackup').uploadDatabaseBackup;
 } catch {
-  console.log('[Info] driveBackup.js não configurado.');
+    console.log('[Info] driveBackup.js não configurado.');
 }
 
 const PORT = process.env.PORT || 8080;
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+const MAX_MEDIA_BASE64 = 2.5 * 1024 * 1024; // ~2.5MB base64 (~1.8MB binário) – segurança
 
-// Mapeamento de usuários ativos: username => { ws, displayName, isBusy, callTarget }
 const activeSockets = new Map();
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/ping') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    return res.end('pong');
-  }
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
-      status: 'OK',
-      onlineUsers: activeSockets.size,
-      uptime: Math.floor(process.uptime())
-    }));
-  }
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Servidor ZapZap - Sinalização WebRTC e Chat de Voz/Texto');
+    if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        return res.end('pong');
+    }
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+            status: 'OK',
+            onlineUsers: activeSockets.size,
+            uptime: Math.floor(process.uptime())
+        }));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Servidor ZapZap - Sinalização WebRTC e Chat de Voz/Texto/Mídia');
 });
 
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
-// Auto-ping para manter o Render acordado
 if (RENDER_URL) {
-  setInterval(async () => {
-    try { await fetch(`${RENDER_URL}/ping`); } catch (err) {}
-  }, 10 * 60 * 1000);
+    setInterval(async () => {
+        try { await fetch(`${RENDER_URL}/ping`); } catch (_) {}
+    }, 10 * 60 * 1000);
 }
 
-// Backup no Google Drive a cada 6 horas se disponível
 if (typeof uploadDatabaseBackup === 'function') {
-  setInterval(() => uploadDatabaseBackup(dbPath), 6 * 60 * 60 * 1000);
+    setInterval(() => uploadDatabaseBackup(dbPath), 6 * 60 * 60 * 1000);
 }
 
 const wss = new WebSocketServer({ server });
 
-// Verificação de pulso do WebSocket (Ping/Pong)
 const pingInterval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping();
-  });
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
 }, 30000);
 
 wss.on('close', () => clearInterval(pingInterval));
 
 function send(ws, payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(payload));
-  }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+    }
 }
 
 function sendError(ws, message) {
-  send(ws, { type: 'auth_error', message });
+    send(ws, { type: 'auth_error', message });
 }
 
 function getUsersData() {
-  try {
-    return stmtGetAllUsers.all().map(u => ({
-      username: u.username,
-      displayName: u.displayName,
-      avatar: u.avatar,
-      role: u.role,
-      online: activeSockets.has(u.username)
-    }));
-  } catch (err) {
-    return [];
-  }
+    try {
+        return stmtGetAllUsers.all().map(u => ({
+            username: u.username,
+            displayName: u.displayName,
+            avatar: u.avatar,
+            role: u.role,
+            online: activeSockets.has(u.username)
+        }));
+    } catch {
+        return [];
+    }
 }
 
 function broadcastUserList() {
-  const users = getUsersData();
-  const payloadUsers = { type: 'users_list', users };
-  const payloadContacts = { type: 'contacts_list', users };
-
-  for (const { ws } of activeSockets.values()) {
-    send(ws, payloadUsers);
-    send(ws, payloadContacts);
-  }
+    const users = getUsersData();
+    const payloadUsers = { type: 'users_list', users };
+    const payloadContacts = { type: 'contacts_list', users };
+    for (const { ws } of activeSockets.values()) {
+        send(ws, payloadUsers);
+        send(ws, payloadContacts);
+    }
 }
 
 function endUserCall(username) {
-  const session = activeSockets.get(username);
-  if (!session) return;
-  const targetUsername = session.callTarget;
-  session.isBusy = false;
-  session.callTarget = null;
+    const session = activeSockets.get(username);
+    if (!session) return;
+    const targetUsername = session.callTarget;
+    session.isBusy = false;
+    session.callTarget = null;
 
-  if (targetUsername) {
-    const targetSession = activeSockets.get(targetUsername);
-    if (targetSession) {
-      targetSession.isBusy = false;
-      targetSession.callTarget = null;
-      send(targetSession.ws, { type: 'call_ended', from: username });
+    if (targetUsername) {
+        const targetSession = activeSockets.get(targetUsername);
+        if (targetSession) {
+            targetSession.isBusy = false;
+            targetSession.callTarget = null;
+            send(targetSession.ws, { type: 'call_ended', from: username });
+        }
     }
-  }
+}
+
+function isDeletedForUser(msg, username) {
+    if (msg.deleted_for_all) return true;
+    if (!msg.deleted_for) return false;
+    return msg.deleted_for.split(',').includes(username);
 }
 
 wss.on('connection', (ws) => {
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
 
-  let currentUsername = null;
+    let currentUsername = null;
 
-  ws.on('message', async (raw) => {
-    let data;
-    try {
-      data = JSON.parse(raw.toString());
-    } catch {
-      return sendError(ws, 'Mensagem com formato JSON inválido.');
-    }
-
-    try {
-      switch (data.type) {
-        case 'ping':
-          ws.isAlive = true;
-          return send(ws, { type: 'pong' });
-
-        case 'login': {
-          const user = await authenticateUser(data.username, data.password);
-          
-          // Encerra sessão antiga se o usuário já estiver conectado em outro dispositivo
-          if (activeSockets.has(user.username)) {
-            const oldSocket = activeSockets.get(user.username).ws;
-            send(oldSocket, { type: 'auth_error', message: 'Nova conexão realizada em outro dispositivo.' });
-            oldSocket.close();
-          }
-
-          currentUsername = user.username;
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false, callTarget: null });
-
-          send(ws, { type: 'auth_success', user, credentials: { username: data.username, password: data.password } });
-          broadcastUserList();
-          break;
+    ws.on('message', async (raw) => {
+        let data;
+        try {
+            data = JSON.parse(raw.toString());
+        } catch {
+            return sendError(ws, 'Mensagem com formato JSON inválido.');
         }
 
-        case 'register': {
-          const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
-          
-          currentUsername = user.username;
-          activeSockets.set(currentUsername, { ws, displayName: user.displayName, isBusy: false, callTarget: null });
+        try {
+            switch (data.type) {
+                case 'ping':
+                    ws.isAlive = true;
+                    return send(ws, { type: 'pong' });
 
-          send(ws, { type: 'auth_success', user, credentials: { username: data.username, password: data.password } });
-          broadcastUserList();
-          break;
+                case 'login': {
+                    const user = await authenticateUser(data.username, data.password);
+
+                    if (activeSockets.has(user.username)) {
+                        const oldSocket = activeSockets.get(user.username).ws;
+                        send(oldSocket, { type: 'auth_error', message: 'Nova conexão realizada em outro dispositivo.' });
+                        oldSocket.close();
+                    }
+
+                    currentUsername = user.username;
+                    activeSockets.set(currentUsername, {
+                        ws,
+                        displayName: user.displayName,
+                        isBusy: false,
+                        callTarget: null
+                    });
+
+                    send(ws, {
+                        type: 'auth_success',
+                        user,
+                        credentials: { username: data.username, password: data.password }
+                    });
+                    broadcastUserList();
+                    break;
+                }
+
+                case 'register': {
+                    const user = await registerUser(data.username, data.password, data.displayName, data.avatar);
+                    currentUsername = user.username;
+                    activeSockets.set(currentUsername, {
+                        ws,
+                        displayName: user.displayName,
+                        isBusy: false,
+                        callTarget: null
+                    });
+                    send(ws, {
+                        type: 'auth_success',
+                        user,
+                        credentials: { username: data.username, password: data.password }
+                    });
+                    broadcastUserList();
+                    break;
+                }
+
+                case 'get_contacts':
+                case 'get_users': {
+                    send(ws, { type: 'contacts_list', users: getUsersData() });
+                    break;
+                }
+
+                // --- MENSAGENS TEXTO + MÍDIA ---
+                case 'chat_message': {
+                    if (!currentUsername || !data.to || (!data.text && !data.media)) return;
+
+                    const msgType = data.msg_type || 'text';
+                    let content = (data.text || '').trim();
+                    let mediaMeta = null;
+
+                    if (data.media) {
+                        if (typeof data.media !== 'string' || data.media.length > MAX_MEDIA_BASE64) {
+                            return send(ws, {
+                                type: 'chat_error',
+                                message: 'Arquivo muito grande. Máximo ~1.8 MB após compressão.'
+                            });
+                        }
+                        content = data.media; // base64 data URL
+                        mediaMeta = JSON.stringify({
+                            name: data.fileName || 'arquivo',
+                            mime: data.mime || 'application/octet-stream',
+                            size: data.media.length,
+                            duration: data.duration || null
+                        });
+                    }
+
+                    if (!content) return;
+
+                    const timestamp = Date.now();
+                    const info = stmtInsertMessage.run(
+                        currentUsername,
+                        data.to,
+                        content,
+                        timestamp,
+                        msgType,
+                        mediaMeta
+                    );
+
+                    const payload = {
+                        type: 'chat_message',
+                        id: info.lastInsertRowid,
+                        from: currentUsername,
+                        to: data.to,
+                        text: msgType === 'text' ? content : null,
+                        media: msgType !== 'text' ? content : null,
+                        msg_type: msgType,
+                        media_meta: mediaMeta ? JSON.parse(mediaMeta) : null,
+                        timestamp
+                    };
+
+                    // Envia para o destinatário
+                    const targetSession = activeSockets.get(data.to);
+                    if (targetSession) {
+                        send(targetSession.ws, payload);
+                    }
+                    // Echo de confirmação para o remetente (com id real)
+                    send(ws, { ...payload, confirmed: true });
+                    break;
+                }
+
+                case 'get_chat_history': {
+                    if (!currentUsername || !data.withUser) return;
+
+                    const history = stmtGetChatHistory.all(
+                        currentUsername, data.withUser,
+                        data.withUser, currentUsername
+                    );
+
+                    const filtered = history
+                        .filter(m => !isDeletedForUser(m, currentUsername))
+                        .map(m => ({
+                            id: m.id,
+                            sender: m.sender,
+                            content: m.deleted_for_all ? null : m.content,
+                            timestamp: m.timestamp,
+                            msg_type: m.msg_type || 'text',
+                            media_meta: m.media_meta ? JSON.parse(m.media_meta) : null,
+                            deleted_for_all: !!m.deleted_for_all
+                        }));
+
+                    send(ws, {
+                        type: 'chat_history',
+                        withUser: data.withUser,
+                        messages: filtered
+                    });
+                    break;
+                }
+
+                // --- EXCLUSÃO DE MENSAGENS ---
+                case 'delete_message': {
+                    if (!currentUsername || !data.messageId) return;
+                    const forAll = !!data.forAll;
+
+                    if (forAll) {
+                        const result = stmtDeleteForAll.run(data.messageId, currentUsername);
+                        if (result.changes > 0) {
+                            // Notifica ambos os lados
+                            const payload = {
+                                type: 'message_deleted',
+                                messageId: data.messageId,
+                                forAll: true,
+                                by: currentUsername
+                            };
+                            send(ws, payload);
+                            // Encontra o outro participante via histórico recente não é ideal;
+                            // broadcast simples para o alvo se conhecido
+                            if (data.withUser) {
+                                const target = activeSockets.get(data.withUser);
+                                if (target) send(target.ws, payload);
+                            }
+                        }
+                    } else {
+                        stmtSoftDeleteForUser.run(
+                            currentUsername, currentUsername, currentUsername,
+                            data.messageId
+                        );
+                        send(ws, {
+                            type: 'message_deleted',
+                            messageId: data.messageId,
+                            forAll: false,
+                            by: currentUsername
+                        });
+                    }
+                    break;
+                }
+
+                case 'delete_conversation': {
+                    if (!currentUsername || !data.withUser) return;
+                    const forAll = !!data.forAll;
+
+                    if (forAll) {
+                        stmtDeleteConversationForAll.run(
+                            currentUsername, data.withUser,
+                            data.withUser, currentUsername,
+                            currentUsername
+                        );
+                        const payload = {
+                            type: 'conversation_deleted',
+                            withUser: data.withUser,
+                            forAll: true,
+                            by: currentUsername
+                        };
+                        send(ws, payload);
+                        const target = activeSockets.get(data.withUser);
+                        if (target) send(target.ws, payload);
+                    } else {
+                        stmtDeleteConversationForUser.run(
+                            currentUsername, currentUsername, currentUsername,
+                            currentUsername, data.withUser,
+                            data.withUser, currentUsername
+                        );
+                        send(ws, {
+                            type: 'conversation_deleted',
+                            withUser: data.withUser,
+                            forAll: false,
+                            by: currentUsername
+                        });
+                    }
+                    break;
+                }
+
+                // --- WEBRTC ---
+                case 'call_initiate': {
+                    if (!currentUsername) return;
+                    const calleeSession = activeSockets.get(data.callee);
+                    const callerSession = activeSockets.get(currentUsername);
+
+                    if (!calleeSession) {
+                        return send(ws, { type: 'call_offline', callee: data.callee });
+                    }
+                    if (calleeSession.isBusy) {
+                        return send(ws, { type: 'call_error', message: 'O usuário está ocupado em outra chamada.' });
+                    }
+
+                    callerSession.isBusy = true;
+                    callerSession.callTarget = data.callee;
+
+                    send(calleeSession.ws, {
+                        type: 'call_incoming',
+                        caller: currentUsername,
+                        callerDisplayName: callerSession.displayName,
+                        offer: data.offer
+                    });
+                    break;
+                }
+
+                case 'call_answer': {
+                    if (!currentUsername) return;
+                    const callerSession = activeSockets.get(data.caller);
+                    const answererSession = activeSockets.get(currentUsername);
+
+                    if (answererSession) {
+                        answererSession.isBusy = true;
+                        answererSession.callTarget = data.caller;
+                    }
+                    if (callerSession) {
+                        callerSession.isBusy = true;
+                        callerSession.callTarget = currentUsername;
+                        send(callerSession.ws, {
+                            type: 'call_answered',
+                            answerer: currentUsername,
+                            answer: data.answer
+                        });
+                    }
+                    break;
+                }
+
+                case 'call_reject': {
+                    if (!currentUsername) return;
+                    const callerSession = activeSockets.get(data.caller);
+                    if (callerSession) {
+                        callerSession.isBusy = false;
+                        callerSession.callTarget = null;
+                        send(callerSession.ws, { type: 'call_rejected', from: currentUsername });
+                    }
+                    break;
+                }
+
+                case 'call_ice_candidate': {
+                    if (!currentUsername) return;
+                    const targetSession = activeSockets.get(data.to);
+                    if (targetSession) {
+                        send(targetSession.ws, {
+                            type: 'call_ice_candidate',
+                            from: currentUsername,
+                            candidate: data.candidate
+                        });
+                    }
+                    break;
+                }
+
+                case 'call_end': {
+                    if (!currentUsername) return;
+                    endUserCall(currentUsername);
+                    break;
+                }
+            }
+        } catch (err) {
+            sendError(ws, err.message || 'Erro interno no servidor.');
         }
+    });
 
-        case 'get_contacts':
-        case 'get_users': {
-          send(ws, { type: 'contacts_list', users: getUsersData() });
-          break;
+    ws.on('close', () => {
+        if (currentUsername) {
+            endUserCall(currentUsername);
+            activeSockets.delete(currentUsername);
+            broadcastUserList();
         }
-
-        // --- SISTEMA DE MENSAGENS E HISTÓRICO ---
-        case 'chat_message': {
-          if (!currentUsername || !data.to || !data.text) return;
-          
-          const timestamp = Date.now();
-          stmtInsertMessage.run(currentUsername, data.to, data.text.trim(), timestamp);
-
-          const payload = {
-            type: 'chat_message',
-            from: currentUsername,
-            to: data.to,
-            text: data.text.trim(),
-            timestamp
-          };
-
-          const targetSession = activeSockets.get(data.to);
-          if (targetSession) {
-            send(targetSession.ws, payload);
-          }
-          break;
-        }
-
-        case 'get_chat_history': {
-          if (!currentUsername || !data.withUser) return;
-          
-          const history = stmtGetChatHistory.all(currentUsername, data.withUser, data.withUser, currentUsername);
-          send(ws, { type: 'chat_history', withUser: data.withUser, messages: history });
-          break;
-        }
-
-        // --- PROTOCOLO DE SINALIZAÇÃO WEBRTC (LIGAÇÕES DE VOZ) ---
-        case 'call_initiate': {
-          if (!currentUsername) return;
-          const calleeSession = activeSockets.get(data.callee);
-          const callerSession = activeSockets.get(currentUsername);
-
-          if (!calleeSession) {
-            return send(ws, { type: 'call_offline', callee: data.callee });
-          }
-
-          if (calleeSession.isBusy) {
-            return send(ws, { type: 'call_error', message: 'O usuário está ocupado em outra chamada.' });
-          }
-
-          callerSession.isBusy = true;
-          callerSession.callTarget = data.callee;
-
-          send(calleeSession.ws, {
-            type: 'call_incoming',
-            caller: currentUsername,
-            callerDisplayName: callerSession.displayName,
-            offer: data.offer
-          });
-          break;
-        }
-
-        case 'call_answer': {
-          if (!currentUsername) return;
-          const callerSession = activeSockets.get(data.caller);
-          const answererSession = activeSockets.get(currentUsername);
-
-          if (answererSession) {
-            answererSession.isBusy = true;
-            answererSession.callTarget = data.caller;
-          }
-
-          if (callerSession) {
-            callerSession.isBusy = true;
-            callerSession.callTarget = currentUsername;
-            send(callerSession.ws, { type: 'call_answered', answerer: currentUsername, answer: data.answer });
-          }
-          break;
-        }
-
-        case 'call_reject': {
-          if (!currentUsername) return;
-          const callerSession = activeSockets.get(data.caller);
-          if (callerSession) {
-            callerSession.isBusy = false;
-            callerSession.callTarget = null;
-            send(callerSession.ws, { type: 'call_rejected', from: currentUsername });
-          }
-          break;
-        }
-
-        case 'call_ice_candidate': {
-          if (!currentUsername) return;
-          const targetSession = activeSockets.get(data.to);
-          if (targetSession) {
-            send(targetSession.ws, { type: 'call_ice_candidate', from: currentUsername, candidate: data.candidate });
-          }
-          break;
-        }
-
-        case 'call_end': {
-          if (!currentUsername) return;
-          endUserCall(currentUsername);
-          break;
-        }
-      }
-    } catch (err) {
-      sendError(ws, err.message || 'Erro interno no servidor.');
-    }
-  });
-
-  ws.on('close', () => {
-    if (currentUsername) {
-      endUserCall(currentUsername);
-      activeSockets.delete(currentUsername);
-      broadcastUserList();
-    }
-  });
+    });
 });
 
-server.listen(PORT, () => console.log(`🚀 Servidor ZapZap ativo e escutando na porta ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Servidor ZapZap ativo na porta ${PORT}`));

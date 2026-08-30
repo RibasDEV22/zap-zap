@@ -131,10 +131,9 @@ async function initDb() {
         console.log('[TURSO] Conectado e tabelas/migrações verificadas com sucesso!');
     } catch (err) {
         console.error('[TURSO] Erro ao inicializar o banco:', err.message);
+        throw err; // importante: propaga o erro para o startServer não subir com DB quebrado
     }
 }
-
-initDb();
 
 // ============================================================
 // USERS
@@ -474,6 +473,7 @@ async function sendDiscordBackup() {
 module.exports = {
     db,
     dbPath,
+    initDb,                     // <-- exportada
 
     stmtRegister,
     stmtGetUser,

@@ -1,0 +1,1361 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>ZapZap Admin</title>
+
+<style>
+    * {
+        box-sizing: border-box;
+    }
+
+    body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Arial, Helvetica, sans-serif;
+        background: #0b0d10;
+        color: #fff;
+    }
+
+    button,
+    input {
+        font: inherit;
+    }
+
+    button {
+        cursor: pointer;
+        border: 0;
+    }
+
+    .hidden {
+        display: none !important;
+    }
+
+    .center {
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+    }
+
+    .card {
+        width: 100%;
+        max-width: 430px;
+        background: #15191f;
+        border: 1px solid #252b33;
+        border-radius: 18px;
+        padding: 28px;
+        box-shadow: 0 20px 70px rgba(0,0,0,.45);
+    }
+
+    h1 {
+        margin-top: 0;
+    }
+
+    input {
+        width: 100%;
+        padding: 13px 14px;
+        margin: 8px 0;
+        border-radius: 10px;
+        border: 1px solid #303740;
+        background: #0d1014;
+        color: #fff;
+        outline: none;
+    }
+
+    input:focus {
+        border-color: #5865f2;
+    }
+
+    .btn {
+        padding: 11px 15px;
+        border-radius: 9px;
+        background: #5865f2;
+        color: white;
+        font-weight: bold;
+    }
+
+    .btn:hover {
+        filter: brightness(1.1);
+    }
+
+    .danger {
+        background: #e5484d;
+    }
+
+    .warning {
+        background: #d99a00;
+    }
+
+    .secondary {
+        background: #303740;
+    }
+
+    .success {
+        background: #2e9b62;
+    }
+
+    #dashboard {
+        padding: 25px;
+        max-width: 1500px;
+        margin: auto;
+    }
+
+    .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 15px;
+        flex-wrap: wrap;
+        margin-bottom: 25px;
+    }
+
+    .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .stats {
+        display: grid;
+        grid-template-columns:
+            repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+
+    .stat {
+        background: #15191f;
+        border: 1px solid #252b33;
+        border-radius: 14px;
+        padding: 18px;
+    }
+
+    .stat-value {
+        font-size: 28px;
+        font-weight: bold;
+        margin-top: 5px;
+    }
+
+    .table-wrap {
+        overflow-x: auto;
+        background: #15191f;
+        border: 1px solid #252b33;
+        border-radius: 14px;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 950px;
+    }
+
+    th,
+    td {
+        text-align: left;
+        padding: 13px;
+        border-bottom: 1px solid #252b33;
+    }
+
+    th {
+        background: #111419;
+    }
+
+    tr:last-child td {
+        border-bottom: 0;
+    }
+
+    .avatar {
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        object-fit: cover;
+        background: #303740;
+        vertical-align: middle;
+    }
+
+    .online {
+        color: #54d68a;
+        font-weight: bold;
+    }
+
+    .offline {
+        color: #777;
+    }
+
+    .banned {
+        color: #ff5c64;
+        font-weight: bold;
+    }
+
+    .restricted {
+        color: #ffc857;
+        font-weight: bold;
+    }
+
+    .actions-cell {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,.75);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 999;
+    }
+
+    .modal-box {
+        width: 100%;
+        max-width: 500px;
+        background: #15191f;
+        border: 1px solid #303740;
+        border-radius: 16px;
+        padding: 22px;
+    }
+
+    .modal-buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 15px;
+    }
+
+    .small {
+        font-size: 13px;
+        color: #9ba3ad;
+    }
+
+    #toast {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        background: #171b20;
+        border: 1px solid #303740;
+        padding: 13px 16px;
+        border-radius: 10px;
+        display: none;
+        z-index: 2000;
+        max-width: 400px;
+    }
+</style>
+</head>
+
+<body>
+
+<!-- =========================================================
+     LOGIN
+========================================================= -->
+
+<div id="loginScreen" class="center">
+
+    <div class="card">
+
+        <h1>🛠️ ZapZap Admin</h1>
+
+        <p class="small">
+            Painel administrativo protegido pelo servidor.
+        </p>
+
+        <input
+            id="adminPassword"
+            type="password"
+            placeholder="Senha administrativa"
+            autocomplete="current-password"
+        >
+
+        <button
+            class="btn"
+            style="width:100%; margin-top:8px;"
+            onclick="login()"
+        >
+            Entrar
+        </button>
+
+        <p
+            id="loginError"
+            class="small"
+            style="color:#ff6b72;"
+        ></p>
+
+    </div>
+
+</div>
+
+<!-- =========================================================
+     DASHBOARD
+========================================================= -->
+
+<div
+    id="dashboard"
+    class="hidden"
+>
+
+    <div class="topbar">
+
+        <div>
+            <h1>ZapZap Admin 🛠️</h1>
+
+            <div
+                id="serverInfo"
+                class="small"
+            >
+                Carregando...
+            </div>
+        </div>
+
+        <div class="actions">
+
+            <button
+                class="btn success"
+                onclick="downloadBackup()"
+            >
+                💾 Backup
+            </button>
+
+            <button
+                class="btn warning"
+                onclick="document.getElementById('restoreInput').click()"
+            >
+                📥 Restaurar
+            </button>
+
+            <button
+                class="btn secondary"
+                onclick="loadUsers()"
+            >
+                🔄 Atualizar
+            </button>
+
+            <button
+                class="btn danger"
+                onclick="logout()"
+            >
+                Sair
+            </button>
+
+            <input
+                id="restoreInput"
+                type="file"
+                accept=".db,.sqlite,.sqlite3,application/x-sqlite3"
+                class="hidden"
+                onchange="restoreBackup(this)"
+            >
+
+        </div>
+
+    </div>
+
+    <div class="stats">
+
+        <div class="stat">
+            <div class="small">
+                Usuários
+            </div>
+
+            <div
+                id="userCount"
+                class="stat-value"
+            >
+                0
+            </div>
+        </div>
+
+        <div class="stat">
+            <div class="small">
+                Online
+            </div>
+
+            <div
+                id="onlineCount"
+                class="stat-value"
+            >
+                0
+            </div>
+        </div>
+
+        <div class="stat">
+            <div class="small">
+                Banidos
+            </div>
+
+            <div
+                id="bannedCount"
+                class="stat-value"
+            >
+                0
+            </div>
+        </div>
+
+        <div class="stat">
+            <div class="small">
+                Restritos
+            </div>
+
+            <div
+                id="restrictedCount"
+                class="stat-value"
+            >
+                0
+            </div>
+        </div>
+
+    </div>
+
+    <div class="table-wrap">
+
+        <table>
+
+            <thead>
+
+                <tr>
+                    <th>Usuário</th>
+                    <th>Nome</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Criado</th>
+                    <th>Ações</th>
+                </tr>
+
+            </thead>
+
+            <tbody id="usersTable">
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+</div>
+
+<!-- =========================================================
+     MODAL
+========================================================= -->
+
+<div
+    id="modal"
+    class="modal hidden"
+>
+
+    <div class="modal-box">
+
+        <h2 id="modalTitle">
+            Editar usuário
+        </h2>
+
+        <input
+            id="editUsername"
+            type="hidden"
+        >
+
+        <label class="small">
+            Nome de exibição
+        </label>
+
+        <input
+            id="editDisplayName"
+            maxlength="30"
+        >
+
+        <label class="small">
+            Avatar
+        </label>
+
+        <input
+            id="editAvatar"
+            placeholder="Data URL / imagem"
+        >
+
+        <div class="modal-buttons">
+
+            <button
+                class="btn secondary"
+                onclick="closeModal()"
+            >
+                Cancelar
+            </button>
+
+            <button
+                class="btn"
+                onclick="saveProfile()"
+            >
+                Salvar
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+let users = [];
+
+// ============================================================
+// TOAST
+// ============================================================
+
+function toast(message) {
+    const el =
+        document.getElementById('toast');
+
+    el.textContent = message;
+    el.style.display = 'block';
+
+    clearTimeout(
+        window.__toastTimer
+    );
+
+    window.__toastTimer =
+        setTimeout(() => {
+            el.style.display =
+                'none';
+        }, 3500);
+}
+
+// ============================================================
+// API
+// ============================================================
+
+async function api(
+    url,
+    options = {}
+) {
+    const response =
+        await fetch(
+            url,
+            Object.assign(
+                {
+                    credentials:
+                        'same-origin'
+                },
+                options
+            )
+        );
+
+    let data;
+
+    try {
+        data =
+            await response.json();
+    } catch {
+        data = {};
+    }
+
+    if (
+        response.status === 401
+    ) {
+        showLogin();
+        throw new Error(
+            'Sessao expirada.'
+        );
+    }
+
+    if (!response.ok) {
+        throw new Error(
+            data.error ||
+            'Erro no servidor.'
+        );
+    }
+
+    return data;
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+async function login() {
+    const password =
+        document
+            .getElementById(
+                'adminPassword'
+            )
+            .value;
+
+    const error =
+        document.getElementById(
+            'loginError'
+        );
+
+    error.textContent = '';
+
+    try {
+
+        await api(
+            '/admin/api/login',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+
+                body:
+                    JSON.stringify({
+                        password
+                    })
+            }
+        );
+
+        document
+            .getElementById(
+                'adminPassword'
+            )
+            .value = '';
+
+        showDashboard();
+
+        await loadUsers();
+
+    } catch (err) {
+        error.textContent =
+            err.message;
+    }
+}
+
+document
+    .getElementById(
+        'adminPassword'
+    )
+    .addEventListener(
+        'keydown',
+        e => {
+            if (
+                e.key === 'Enter'
+            ) {
+                login();
+            }
+        }
+    );
+
+// ============================================================
+// TELAS
+// ============================================================
+
+function showDashboard() {
+    document
+        .getElementById(
+            'loginScreen'
+        )
+        .classList.add(
+            'hidden'
+        );
+
+    document
+        .getElementById(
+            'dashboard'
+        )
+        .classList.remove(
+            'hidden'
+        );
+}
+
+function showLogin() {
+    document
+        .getElementById(
+            'dashboard'
+        )
+        .classList.add(
+            'hidden'
+        );
+
+    document
+        .getElementById(
+            'loginScreen'
+        )
+        .classList.remove(
+            'hidden'
+        );
+}
+
+// ============================================================
+// USERS
+// ============================================================
+
+async function loadUsers() {
+
+    try {
+
+        const data =
+            await api(
+                '/admin/api/status'
+            );
+
+        users =
+            data.users || [];
+
+        document
+            .getElementById(
+                'userCount'
+            )
+            .textContent =
+            users.length;
+
+        document
+            .getElementById(
+                'onlineCount'
+            )
+            .textContent =
+            data.onlineUsers;
+
+        document
+            .getElementById(
+                'bannedCount'
+            )
+            .textContent =
+            users.filter(
+                u => !!u.banned
+            ).length;
+
+        document
+            .getElementById(
+                'restrictedCount'
+            )
+            .textContent =
+            users.filter(
+                u =>
+                    Number(
+                        u.restrictedUntil
+                    ) > Date.now()
+            ).length;
+
+        document
+            .getElementById(
+                'serverInfo'
+            )
+            .textContent =
+            `Uptime: ${formatUptime(data.uptime)} • Banco: ${data.database}`;
+
+        renderUsers();
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+function formatUptime(seconds) {
+
+    seconds =
+        Number(seconds) || 0;
+
+    const days =
+        Math.floor(
+            seconds / 86400
+        );
+
+    seconds %= 86400;
+
+    const hours =
+        Math.floor(
+            seconds / 3600
+        );
+
+    seconds %= 3600;
+
+    const minutes =
+        Math.floor(
+            seconds / 60
+        );
+
+    return `${days}d ${hours}h ${minutes}m`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+function renderUsers() {
+
+    const tbody =
+        document.getElementById(
+            'usersTable'
+        );
+
+    tbody.innerHTML = '';
+
+    for (const user of users) {
+
+        const tr =
+            document.createElement(
+                'tr'
+            );
+
+        let status =
+            '<span class="offline">Offline</span>';
+
+        if (user.banned) {
+            status =
+                '<span class="banned">BANIDO</span>';
+
+        } else if (
+            Number(
+                user.restrictedUntil
+            ) > Date.now()
+        ) {
+            status =
+                `<span class="restricted">RESTRITO até ${new Date(
+                    user.restrictedUntil
+                ).toLocaleString('pt-BR')}</span>`;
+        } else if (
+            isOnline(user.username)
+        ) {
+            status =
+                '<span class="online">● Online</span>';
+        }
+
+        const avatar =
+            user.avatar
+                ? `<img class="avatar" src="${escapeHtml(user.avatar)}">`
+                : '<div class="avatar"></div>';
+
+        const canModerate =
+            user.role !== 'Criador';
+
+        tr.innerHTML = `
+            <td>
+                ${avatar}
+                <strong>
+                    ${escapeHtml(user.username)}
+                </strong>
+            </td>
+
+            <td>
+                ${escapeHtml(user.displayName)}
+            </td>
+
+            <td>
+                ${escapeHtml(user.role)}
+            </td>
+
+            <td>
+                ${status}
+            </td>
+
+            <td>
+                ${new Date(
+                    user.createdAt
+                ).toLocaleString('pt-BR')}
+            </td>
+
+            <td>
+                <div class="actions-cell">
+
+                    <button
+                        class="btn secondary"
+                        onclick="editUser('${encodeURIComponent(user.username)}')"
+                    >
+                        ✏️ Editar
+                    </button>
+
+                    ${
+                        canModerate
+                            ? `
+                        <button
+                            class="btn warning"
+                            onclick="restrictUser('${encodeURIComponent(user.username)}')"
+                        >
+                            ⏱️ Restringir
+                        </button>
+
+                        <button
+                            class="btn ${
+                                user.banned
+                                    ? 'success'
+                                    : 'danger'
+                            }"
+                            onclick="toggleBan('${encodeURIComponent(user.username)}')"
+                        >
+                            ${
+                                user.banned
+                                    ? '✅ Desbanir'
+                                    : '🚫 Banir'
+                            }
+                        </button>
+                        `
+                            : `
+                        <span class="small">
+                            Protegido
+                        </span>
+                        `
+                    }
+
+                </div>
+            </td>
+        `;
+
+        tbody.appendChild(tr);
+    }
+}
+
+function isOnline(username) {
+    // O status de online real é mantido
+    // pelo backend. Aqui usamos o endpoint
+    // atualizado a cada refresh.
+    return false;
+}
+
+// ============================================================
+// EDITAR PERFIL
+// ============================================================
+
+function editUser(encodedUsername) {
+
+    const username =
+        decodeURIComponent(
+            encodedUsername
+        );
+
+    const user =
+        users.find(
+            u =>
+                u.username ===
+                username
+        );
+
+    if (!user) {
+        return;
+    }
+
+    document
+        .getElementById(
+            'editUsername'
+        )
+        .value =
+        username;
+
+    document
+        .getElementById(
+            'editDisplayName'
+        )
+        .value =
+        user.displayName || '';
+
+    document
+        .getElementById(
+            'editAvatar'
+        )
+        .value =
+        user.avatar || '';
+
+    document
+        .getElementById(
+            'modal'
+        )
+        .classList.remove(
+            'hidden'
+        );
+}
+
+function closeModal() {
+    document
+        .getElementById(
+            'modal'
+        )
+        .classList.add(
+            'hidden'
+        );
+}
+
+async function saveProfile() {
+
+    try {
+
+        await api(
+            '/admin/api/user/profile',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+
+                body:
+                    JSON.stringify({
+                        username:
+                            document
+                                .getElementById(
+                                    'editUsername'
+                                )
+                                .value,
+
+                        displayName:
+                            document
+                                .getElementById(
+                                    'editDisplayName'
+                                )
+                                .value,
+
+                        avatar:
+                            document
+                                .getElementById(
+                                    'editAvatar'
+                                )
+                                .value
+                    })
+            }
+        );
+
+        closeModal();
+
+        toast(
+            'Perfil atualizado.'
+        );
+
+        await loadUsers();
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+// ============================================================
+// BAN
+// ============================================================
+
+async function toggleBan(
+    encodedUsername
+) {
+
+    const username =
+        decodeURIComponent(
+            encodedUsername
+        );
+
+    const user =
+        users.find(
+            u =>
+                u.username ===
+                username
+        );
+
+    if (!user) {
+        return;
+    }
+
+    const shouldBan =
+        !user.banned;
+
+    const text =
+        shouldBan
+            ? `Banir @${username}?`
+            : `Desbanir @${username}?`;
+
+    if (
+        !confirm(text)
+    ) {
+        return;
+    }
+
+    try {
+
+        await api(
+            '/admin/api/user/moderation',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+
+                body:
+                    JSON.stringify({
+                        username,
+                        banned:
+                            shouldBan,
+                        restrictedUntil:
+                            0
+                    })
+            }
+        );
+
+        toast(
+            shouldBan
+                ? 'Usuário banido.'
+                : 'Usuário desbanido.'
+        );
+
+        await loadUsers();
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+// ============================================================
+// RESTRIÇÃO
+// ============================================================
+
+async function restrictUser(
+    encodedUsername
+) {
+
+    const username =
+        decodeURIComponent(
+            encodedUsername
+        );
+
+    const minutes =
+        prompt(
+            `Quantos minutos @${username} ficará restrito?\n\nDigite 0 para remover a restrição.`
+        );
+
+    if (
+        minutes === null
+    ) {
+        return;
+    }
+
+    const parsed =
+        Number(minutes);
+
+    if (
+        !Number.isFinite(parsed) ||
+        parsed < 0
+    ) {
+        toast(
+            'Tempo inválido.'
+        );
+
+        return;
+    }
+
+    const restrictedUntil =
+        parsed === 0
+            ? 0
+            : Date.now() +
+              parsed * 60 * 1000;
+
+    try {
+
+        await api(
+            '/admin/api/user/moderation',
+            {
+                method: 'POST',
+
+                headers: {
+                    'Content-Type':
+                        'application/json'
+                },
+
+                body:
+                    JSON.stringify({
+                        username,
+                        banned: false,
+                        restrictedUntil
+                    })
+            }
+        );
+
+        toast(
+            parsed === 0
+                ? 'Restrição removida.'
+                : `Usuário restrito por ${parsed} minuto(s).`
+        );
+
+        await loadUsers();
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+// ============================================================
+// BACKUP
+// ============================================================
+
+async function downloadBackup() {
+
+    try {
+
+        const response =
+            await fetch(
+                '/admin/api/backup',
+                {
+                    credentials:
+                        'same-origin'
+                }
+            );
+
+        if (
+            response.status === 401
+        ) {
+            showLogin();
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                'Falha ao criar backup.'
+            );
+        }
+
+        const blob =
+            await response.blob();
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+        const a =
+            document.createElement(
+                'a'
+            );
+
+        a.href = url;
+
+        a.download =
+            `zapzap_backup_${new Date()
+                .toISOString()
+                .replaceAll(':', '-')
+                .replaceAll('.', '-')}.db`;
+
+        document.body.appendChild(a);
+
+        a.click();
+
+        a.remove();
+
+        URL.revokeObjectURL(
+            url
+        );
+
+        toast(
+            'Backup baixado.'
+        );
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+// ============================================================
+// RESTORE
+// ============================================================
+
+async function restoreBackup(
+    input
+) {
+
+    const file =
+        input.files[0];
+
+    input.value = '';
+
+    if (!file) {
+        return;
+    }
+
+    const confirmed =
+        confirm(
+            'ATENÇÃO!\n\nIsso vai substituir os dados atuais do ZapZap pelo backup escolhido.\n\nContinuar?'
+        );
+
+    if (!confirmed) {
+        return;
+    }
+
+    try {
+
+        toast(
+            'Enviando backup e restaurando banco...'
+        );
+
+        const response =
+            await fetch(
+                '/admin/api/restore',
+                {
+                    method: 'POST',
+
+                    credentials:
+                        'same-origin',
+
+                    headers: {
+                        'Content-Type':
+                            'application/x-sqlite3'
+                    },
+
+                    body: file
+                }
+            );
+
+        let data = {};
+
+        try {
+            data =
+                await response.json();
+        } catch {}
+
+        if (!response.ok) {
+            throw new Error(
+                data.error ||
+                'Falha ao restaurar.'
+            );
+        }
+
+        alert(
+            'Banco restaurado com sucesso!\n\nOs usuários precisarão reconectar.'
+        );
+
+        await loadUsers();
+
+    } catch (err) {
+        toast(
+            err.message
+        );
+    }
+}
+
+// ============================================================
+// LOGOUT
+// ============================================================
+
+async function logout() {
+
+    try {
+        await api(
+            '/admin/api/logout',
+            {
+                method: 'POST'
+            }
+        );
+    } catch {}
+
+    showLogin();
+}
+
+loadUsers().catch(() => {});
+</script>
+
+</body>
+</html>

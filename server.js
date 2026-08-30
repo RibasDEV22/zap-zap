@@ -36,6 +36,7 @@ const {
     stmtSetSetting,
     stmtMarkAsRead,
     stmtUpsertReaction,
+    stmtRemoveReaction,
     stmtGetReactionsByMessage,
     stmtUpdateLastSeen,
     stmtUpsertPushSubscription,

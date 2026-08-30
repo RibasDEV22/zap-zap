@@ -2,46 +2,95 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ZapZap - Painel Administrativo</title>
     <style>
+        * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b141a; color: #e9edef; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        h1, h2 { color: #00a884; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1, h2 { color: #00a884; margin-top: 0; }
         .card { background: #111b21; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #222d34; }
-        input, textarea, button { background: #2a3942; color: #fff; border: 1px solid #3b4a54; padding: 10px; border-radius: 4px; font-size: 14px; }
-        button { background: #00a884; border: none; cursor: pointer; font-weight: bold; }
+        input, textarea, button, select { background: #2a3942; color: #fff; border: 1px solid #3b4a54; padding: 10px; border-radius: 4px; font-size: 14px; }
+        input[type="text"], input[type="password"] { width: 100%; }
+        button { background: #00a884; border: none; cursor: pointer; font-weight: bold; padding: 10px 15px; }
         button:hover { background: #008f6f; }
         button.danger { background: #ea0038; }
         button.danger:hover { background: #c2002e; }
+        button.secondary { background: #3b4a54; }
+        button.secondary:hover { background: #4a5b66; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #222d34; }
         th { background: #202c33; color: #8696a0; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
         .badge-active { background: #00a884; color: #fff; }
-        .badge-inactive { background: #8696a0; color: #fff; }
+        .badge-inactive { background: #ea0038; color: #fff; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
+        .stat-box { background: #202c33; padding: 15px; border-radius: 6px; text-align: center; }
+        .stat-box .number { font-size: 24px; font-weight: bold; color: #00a884; }
+        
+        /* Modal de Login */
+        #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 20, 26, 0.95); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .login-card { background: #111b21; padding: 30px; border-radius: 8px; border: 1px solid #222d34; width: 320px; text-align: center; }
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Painel Administrativo - ZapZap</h1>
+
+    <!-- OVERLAY DE LOGIN -->
+    <div id="loginOverlay">
+        <div class="login-card">
+            <h2>Acesso Restrito</h2>
+            <p style="color: #8696a0; font-size: 13px;">Digite a senha administrativa para continuar.</p>
+            <form onsubmit="handleLogin(event)">
+                <input type="password" id="adminPassword" placeholder="Senha do Admin" required style="margin-bottom: 15px;">
+                <button type="submit" style="width: 100%;">Entrar no Painel</button>
+            </form>
+            <p id="loginError" style="color: #ea0038; font-size: 13px; margin-top: 10px;" class="hidden"></p>
+        </div>
+    </div>
+
+    <!-- CONTEÚDO DO PAINEL -->
+    <div class="container hidden" id="dashboard">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h1>Painel Administrativo - ZapZap</h1>
+            <button class="secondary" onclick="handleLogout()">Sair</button>
+        </div>
+
+        <!-- ESTATÍSTICAS -->
+        <div class="grid">
+            <div class="stat-box">
+                <div class="number" id="statOnline">0</div>
+                <div style="color: #8696a0; font-size: 12px;">Usuários Online</div>
+            </div>
+            <div class="stat-box">
+                <div class="number" id="statUsers">0</div>
+                <div style="color: #8696a0; font-size: 12px;">Total Registrados</div>
+            </div>
+            <div class="stat-box">
+                <div class="number" id="statUptime">0s</div>
+                <div style="color: #8696a0; font-size: 12px;">Tempo Online</div>
+            </div>
+        </div>
 
         <!-- MODO MANUTENÇÃO -->
         <div class="card">
             <h2>Modo de Manutenção</h2>
             <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
-                <label>
-                    <input type="checkbox" id="maintActive"> Ativar Manutenção
+                <label style="cursor: pointer;">
+                    <input type="checkbox" id="maintActive"> Ativar Manutenção Geral
                 </label>
             </div>
-            <input type="text" id="maintMsg" placeholder="Mensagem de aviso para os usuários..." style="width: 70%;">
-            <button onclick="saveMaintenance()">Salvar Estado</button>
+            <div style="display: flex; gap: 10px;">
+                <input type="text" id="maintMsg" placeholder="Mensagem de aviso para os usuários...">
+                <button onclick="saveMaintenance()">Salvar Estado</button>
+            </div>
         </div>
 
         <!-- QUADRO DE RECADOS -->
         <div class="card">
             <h2>Gerenciar Recados Globais</h2>
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <input type="text" id="newAnnouncement" placeholder="Escreva um recado importante..." style="flex: 1;">
+                <input type="text" id="newAnnouncement" placeholder="Escreva um recado importante...">
                 <button onclick="sendAnnouncement()">Publicar Recado</button>
             </div>
 
@@ -56,58 +105,159 @@
                         <th>Ações</th>
                     </tr>
                 </thead>
-                <tbody id="announcementsTable">
-                    <!-- Preenchido via WebSocket/JS -->
-                </tbody>
+                <tbody id="announcementsTable"></tbody>
             </table>
+        </div>
+
+        <!-- GERENCIAMENTO DE USUÁRIOS -->
+        <div class="card">
+            <h2>Usuários do Sistema</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Usuário</th>
+                        <th>Nome Exibição</th>
+                        <th>Cargo</th>
+                        <th>Status</th>
+                        <th>Ações</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTable"></tbody>
+            </table>
+        </div>
+
+        <!-- BACKUP E RESTAURAÇÃO -->
+        <div class="card">
+            <h2>Backup & Restauração do Banco</h2>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <button onclick="downloadBackup()">Baixar Backup (.db)</button>
+                <div style="border-left: 1px solid #222d34; height: 30px;"></div>
+                <input type="file" id="restoreFile" accept=".db" style="width: auto;">
+                <button class="danger" onclick="restoreBackup()">Restaurar Backup</button>
+            </div>
         </div>
     </div>
 
     <script>
-        const ws = new WebSocket(`ws://${location.host}`);
+        // --- AUTENTICAÇÃO ---
+        async function handleLogin(e) {
+            e.preventDefault();
+            const password = document.getElementById('adminPassword').value;
+            const errEl = document.getElementById('loginError');
+            errEl.classList.add('hidden');
 
-        ws.onopen = () => {
-            // Requisita estado inicial de manutenção e recados
-            ws.send(JSON.stringify({ type: 'get_maintenance' }));
-            ws.send(JSON.stringify({ type: 'get_announcements' }));
-        };
+            try {
+                const res = await fetch('/admin/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                const data = await res.json();
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+                if (res.ok && data.success) {
+                    document.getElementById('loginOverlay').classList.add('hidden');
+                    document.getElementById('dashboard').classList.remove('hidden');
+                    loadDashboard();
+                } else {
+                    errEl.innerText = data.error || 'Erro ao autenticar.';
+                    errEl.classList.remove('hidden');
+                }
+            } catch (err) {
+                errEl.innerText = 'Falha na conexão com o servidor.';
+                errEl.classList.remove('hidden');
+            }
+        }
 
-            if (data.type === 'maintenance_status') {
-                document.getElementById('maintActive').checked = data.maintenance.active;
+        async function handleLogout() {
+            await fetch('/admin/api/logout', { method: 'POST' });
+            location.reload();
+        }
+
+        // --- CARREGAMENTO INICIAL ---
+        async function loadDashboard() {
+            try {
+                const res = await fetch('/admin/api/status');
+                if (res.status === 401) {
+                    document.getElementById('loginOverlay').classList.remove('hidden');
+                    document.getElementById('dashboard').classList.add('hidden');
+                    return;
+                }
+
+                document.getElementById('loginOverlay').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+
+                const data = await res.json();
+                
+                // Atualizar Stats
+                document.getElementById('statOnline').innerText = data.onlineUsers || 0;
+                document.getElementById('statUsers').innerText = data.users ? data.users.length : 0;
+                document.getElementById('statUptime').innerText = formatUptime(data.uptime);
+
+                // Manutenção
+                document.getElementById('maintActive').checked = !!data.maintenance.active;
                 document.getElementById('maintMsg').value = data.maintenance.message || '';
-            }
 
-            if (data.type === 'announcements_list') {
-                renderAnnouncements(data.announcements);
-            }
+                // Usuários
+                renderUsers(data.users || []);
 
-            if (['new_announcement', 'announcement_deactivated', 'announcement_deleted'].includes(data.type)) {
-                ws.send(JSON.stringify({ type: 'get_announcements' }));
+                // Anúncios
+                loadAnnouncements();
+            } catch (err) {
+                console.error('Erro ao carregar o painel:', err);
             }
-        };
+        }
 
-        function saveMaintenance() {
+        // --- MANUTENÇÃO ---
+        async function saveMaintenance() {
             const active = document.getElementById('maintActive').checked;
             const message = document.getElementById('maintMsg').value;
-            ws.send(JSON.stringify({ type: 'set_maintenance', active, message }));
+
+            const res = await fetch('/admin/api/maintenance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ active, message })
+            });
+
+            if (res.ok) alert('Estado de manutenção salvo com sucesso!');
+            else alert('Erro ao salvar manutenção.');
         }
 
-        function sendAnnouncement() {
+        // --- RECADOS ---
+        async function loadAnnouncements() {
+            const res = await fetch('/admin/api/announcements');
+            const data = await res.json();
+            if (data.success) {
+                renderAnnouncements(data.items || []);
+            }
+        }
+
+        async function sendAnnouncement() {
             const input = document.getElementById('newAnnouncement');
-            if (!input.value.trim()) return;
-            ws.send(JSON.stringify({ type: 'create_announcement', message: input.value.trim() }));
-            input.value = '';
+            const message = input.value.trim();
+            if (!message) return;
+
+            const res = await fetch('/admin/api/announcements', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message })
+            });
+
+            if (res.ok) {
+                input.value = '';
+                loadAnnouncements();
+            } else {
+                alert('Erro ao publicar recado.');
+            }
         }
 
-        function deactivateAnnouncement(id) {
-            ws.send(JSON.stringify({ type: 'deactivate_announcement', id }));
-        }
+        async function deactivateAnnouncement(id) {
+            const res = await fetch('/admin/api/announcements/deactivate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            });
 
-        function deleteAnnouncement(id) {
-            ws.send(JSON.stringify({ type: 'delete_announcement', id }));
+            if (res.ok) loadAnnouncements();
         }
 
         function renderAnnouncements(list) {
@@ -120,18 +270,99 @@
                 tbody.innerHTML += `
                     <tr>
                         <td>${item.id}</td>
-                        <td>${item.message}</td>
-                        <td>${item.createdBy}</td>
+                        <td>${escapeHtml(item.message)}</td>
+                        <td>${escapeHtml(item.createdBy)}</td>
                         <td>${date}</td>
                         <td>${status}</td>
                         <td>
                             ${item.active ? `<button onclick="deactivateAnnouncement(${item.id})">Desativar</button>` : ''}
-                            <button class="danger" onclick="deleteAnnouncement(${item.id})">Excluir</button>
                         </td>
                     </tr>
                 `;
             });
         }
+
+        // --- USUÁRIOS & MODERAÇÃO ---
+        function renderUsers(users) {
+            const tbody = document.getElementById('usersTable');
+            tbody.innerHTML = '';
+            users.forEach(u => {
+                const isBanned = !!u.banned;
+                const statusBadge = isBanned 
+                    ? '<span class="badge badge-inactive">Banido</span>' 
+                    : '<span class="badge badge-active">Ativo</span>';
+
+                tbody.innerHTML += `
+                    <tr>
+                        <td><b>@${escapeHtml(u.username)}</b></td>
+                        <td>${escapeHtml(u.displayName)}</td>
+                        <td>${escapeHtml(u.role)}</td>
+                        <td>${statusBadge}</td>
+                        <td>
+                            ${u.role !== 'Criador' ? `
+                                <button class="${isBanned ? '' : 'danger'}" onclick="toggleBan('${u.username}', ${!isBanned})">
+                                    ${isBanned ? 'Desbanir' : 'Banir'}
+                                </button>
+                            ` : '<i>Protegido</i>'}
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function toggleBan(username, banStatus) {
+            if (!confirm(`Deseja realmente ${banStatus ? 'banir' : 'desbanir'} o usuário @${username}?`)) return;
+
+            const res = await fetch('/admin/api/user/moderation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, banned: banStatus })
+            });
+
+            if (res.ok) loadDashboard();
+            else alert('Falha ao alterar status do usuário.');
+        }
+
+        // --- BACKUP & RESTORE ---
+        function downloadBackup() {
+            window.location.href = '/admin/api/backup';
+        }
+
+        async function restoreBackup() {
+            const fileInput = document.getElementById('restoreFile');
+            if (!fileInput.files.length) return alert('Selecione um arquivo .db de backup.');
+
+            if (!confirm('ATENÇÃO: A restauração substituirá todas as mensagens e contas atuais! Continuar?')) return;
+
+            const file = fileInput.files[0];
+            const res = await fetch('/admin/api/restore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-sqlite3' },
+                body: file
+            });
+
+            if (res.ok) {
+                alert('Banco de dados restaurado com sucesso!');
+                loadDashboard();
+            } else {
+                const data = await res.json();
+                alert('Erro na restauração: ' + (data.error || 'Arquivo inválido.'));
+            }
+        }
+
+        // --- UTILITÁRIOS ---
+        function escapeHtml(str) {
+            return String(str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return `${h}h ${m}m`;
+        }
+
+        // Tentar verificar sessão no boot
+        loadDashboard();
     </script>
 </body>
 </html>

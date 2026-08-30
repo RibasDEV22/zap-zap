@@ -15,6 +15,7 @@ try {
 
 const { authenticateUser, registerUser } = require('./auth');
 const {
+    initDb,                         // <-- importada
     stmtGetAllUsers,
     stmtGetAdminUsers,
     stmtGetUser,
@@ -73,30 +74,23 @@ const adminSessions = new Map();
 
 let maintenanceState = { active: false, message: 'Servidor em manutenção.' };
 
-try {
-    const row = stmtGetSetting.get('maintenance');
-    if (row && row.value) {
-        maintenanceState = JSON.parse(row.value);
-    }
-} catch {}
-
-function isStaff(username) {
+async function isStaff(username) {
     if (!username) return false;
-    const user = stmtGetUser.get(username);
+    const user = await stmtGetUser.get(username);
     return user && (user.role === 'Criador' || user.role === 'Admin');
 }
 
-function setMaintenanceMode(active, message) {
+async function setMaintenanceMode(active, message) {
     maintenanceState = {
         active: !!active,
         message: message || 'Servidor em manutenção.'
     };
 
-    stmtSetSetting.run('maintenance', JSON.stringify(maintenanceState));
+    await stmtSetSetting.run('maintenance', JSON.stringify(maintenanceState));
 
     if (maintenanceState.active) {
         for (const [username, session] of activeSockets.entries()) {
-            if (!isStaff(username)) {
+            if (!(await isStaff(username))) {
                 send(session.ws, {
                     type: 'maintenance_active',
                     message: maintenanceState.message
@@ -105,7 +99,7 @@ function setMaintenanceMode(active, message) {
                 activeSockets.delete(username);
             }
         }
-        broadcastUserList();
+        await broadcastUserList();
     }
 
     const payloadStr = JSON.stringify({
@@ -124,11 +118,11 @@ function setMaintenanceMode(active, message) {
 // HELPERS HTTP & WEB PUSH
 // ============================================================
 
-function sendPushNotification(targetUsername, payload) {
+async function sendPushNotification(targetUsername, payload) {
     if (!webPush || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
 
     try {
-        const subscriptions = stmtGetPushSubscriptionsByUser.all(targetUsername);
+        const subscriptions = await stmtGetPushSubscriptionsByUser.all(targetUsername);
         if (!subscriptions || subscriptions.length === 0) return;
 
         const pushData = JSON.stringify(payload);
@@ -145,7 +139,7 @@ function sendPushNotification(targetUsername, payload) {
             webPush.sendNotification(pushConfig, pushData)
                 .catch(err => {
                     if (err.statusCode === 410 || err.statusCode === 404) {
-                        stmtDeletePushSubscriptionByEndpoint.run(sub.endpoint);
+                        stmtDeletePushSubscriptionByEndpoint.run(sub.endpoint).catch(() => {});
                     }
                 });
         });
@@ -312,7 +306,7 @@ async function handleAdminRequest(req, res, pathname) {
     }
 
     if (pathname === '/admin/api/status' && req.method === 'GET') {
-        const users = stmtGetAdminUsers.all();
+        const users = await stmtGetAdminUsers.all();
         return sendJson(res, 200, {
             success: true,
             users,
@@ -326,7 +320,7 @@ async function handleAdminRequest(req, res, pathname) {
     if (pathname === '/admin/api/maintenance' && req.method === 'POST') {
         try {
             const body = parseJsonBody(await readBody(req, 32 * 1024));
-            setMaintenanceMode(body.active, body.message);
+            await setMaintenanceMode(body.active, body.message);
             return sendJson(res, 200, {
                 success: true,
                 maintenance: maintenanceState
@@ -337,7 +331,7 @@ async function handleAdminRequest(req, res, pathname) {
     }
 
     if (pathname === '/admin/api/announcements' && req.method === 'GET') {
-        const items = stmtGetAnnouncements.all();
+        const items = await stmtGetAnnouncements.all();
         return sendJson(res, 200, { success: true, items });
     }
 
@@ -348,11 +342,11 @@ async function handleAdminRequest(req, res, pathname) {
             if (!msg) return sendJson(res, 400, { error: 'Mensagem vazia.' });
 
             const now = Date.now();
-            const info = stmtInsertAnnouncement.run(msg, 'Admin', now);
+            const info = await stmtInsertAnnouncement.run(msg, 'Admin', now);
 
             const payloadStr = JSON.stringify({
                 type: 'announcement_new',
-                id: info.lastInsertRowid,
+                id: info.lastInsertRowid || (info.rows && info.rows[0] && info.rows[0].id) || null,
                 message: msg,
                 createdAt: now
             });
@@ -365,7 +359,7 @@ async function handleAdminRequest(req, res, pathname) {
 
             return sendJson(res, 200, {
                 success: true,
-                id: info.lastInsertRowid
+                id: info.lastInsertRowid || (info.rows && info.rows[0] && info.rows[0].id) || null
             });
         } catch (err) {
             return sendJson(res, 400, { error: err.message });
@@ -378,7 +372,7 @@ async function handleAdminRequest(req, res, pathname) {
             const id = Number(body.id);
             if (!id) return sendJson(res, 400, { error: 'ID invalido.' });
 
-            stmtDeactivateAnnouncement.run(id);
+            await stmtDeactivateAnnouncement.run(id);
 
             const payloadStr = JSON.stringify({
                 type: 'announcement_removed',
@@ -406,7 +400,7 @@ async function handleAdminRequest(req, res, pathname) {
                 return sendJson(res, 400, { error: 'Usuario obrigatorio.' });
             }
 
-            const user = stmtGetUser.get(username);
+            const user = await stmtGetUser.get(username);
             if (!user) {
                 return sendJson(res, 404, { error: 'Usuario nao encontrado.' });
             }
@@ -419,7 +413,7 @@ async function handleAdminRequest(req, res, pathname) {
             let restrictedUntil = Number(body.restrictedUntil) || 0;
             if (restrictedUntil < Date.now()) restrictedUntil = 0;
 
-            stmtSetUserModeration.run(banned, restrictedUntil, username);
+            await stmtSetUserModeration.run(banned, restrictedUntil, username);
 
             if (banned) {
                 closeUserSocket(username, 'Sua conta foi banida.');
@@ -447,8 +441,10 @@ async function handleAdminRequest(req, res, pathname) {
             if (!displayName) return sendJson(res, 400, { error: 'Nome de exibicao obrigatorio.' });
             if (avatar.length > 400 * 1024) return sendJson(res, 400, { error: 'Avatar muito grande.' });
 
-            const result = stmtAdminUpdateUser.run(displayName, avatar, username);
-            if (!result.changes) return sendJson(res, 404, { error: 'Usuario nao encontrado.' });
+            const result = await stmtAdminUpdateUser.run(displayName, avatar, username);
+            if (!result.rowsAffected && !(result.changes > 0)) {
+                return sendJson(res, 404, { error: 'Usuario nao encontrado.' });
+            }
 
             const session = activeSockets.get(username);
             if (session) {
@@ -459,7 +455,7 @@ async function handleAdminRequest(req, res, pathname) {
                 });
             }
 
-            broadcastUserList();
+            await broadcastUserList();
             return sendJson(res, 200, { success: true });
         } catch (err) {
             return sendJson(res, 400, { error: err.message });
@@ -467,66 +463,17 @@ async function handleAdminRequest(req, res, pathname) {
     }
 
     if (pathname === '/admin/api/backup' && req.method === 'GET') {
-        const backupPath = path.join(os.tmpdir(), `zapzap-backup-${Date.now()}.db`);
-        try {
-            await createDatabaseBackup(backupPath);
-            const stat = fs.statSync(backupPath);
-
-            res.writeHead(200, {
-                'Content-Type': 'application/x-sqlite3',
-                'Content-Length': stat.size,
-                'Content-Disposition': 'attachment; filename="zapzap_backup.db"',
-                'Cache-Control': 'no-store'
-            });
-
-            const stream = fs.createReadStream(backupPath);
-            stream.pipe(res);
-            const cleanUp = () => { try { fs.unlinkSync(backupPath); } catch {} };
-            stream.on('close', cleanUp);
-            stream.on('error', cleanUp);
-            return;
-        } catch (err) {
-            return sendJson(res, 500, { error: 'Falha ao criar backup: ' + err.message });
-        }
+        // Turso gerencia backups automaticamente
+        return sendJson(res, 200, {
+            success: true,
+            message: 'Backups são gerenciados automaticamente pelo Turso. Use o painel do Turso para download.'
+        });
     }
 
     if (pathname === '/admin/api/restore' && req.method === 'POST') {
-        const tempPath = path.join(os.tmpdir(), `zapzap-restore-${Date.now()}.db`);
-        try {
-            const body = await readBody(req, MAX_ADMIN_BODY);
-            if (body.length < 100) return sendJson(res, 400, { error: 'Arquivo de backup invalido.' });
-
-            fs.writeFileSync(tempPath, body);
-            const testDb = new (require('better-sqlite3'))(tempPath, { readonly: true, fileMustExist: true });
-            const valid = testDb.prepare(`
-                SELECT count(*) AS count FROM sqlite_master
-                WHERE type = 'table' AND name IN ('users', 'messages')
-            `).get().count >= 2;
-            testDb.close();
-
-            if (!valid) throw new Error('Backup nao pertence ao ZapZap.');
-
-            for (const [username, session] of activeSockets) {
-                send(session.ws, {
-                    type: 'server_restore',
-                    message: 'Servidor restaurando o banco. Reconecte.'
-                });
-                try { session.ws.close(); } catch {}
-                activeSockets.delete(username);
-            }
-
-            await restoreDatabase(tempPath);
-            broadcastUserList();
-
-            return sendJson(res, 200, {
-                success: true,
-                message: 'Banco restaurado com sucesso. Os usuarios devem reconectar.'
-            });
-        } catch (err) {
-            return sendJson(res, 500, { error: 'Falha ao restaurar: ' + err.message });
-        } finally {
-            try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
-        }
+        return sendJson(res, 400, {
+            error: 'Restauração via arquivo .db desativada no Turso. Utilize o painel do Turso.'
+        });
     }
 
     return sendJson(res, 404, { error: 'Endpoint administrativo nao encontrado.' });
@@ -609,9 +556,10 @@ function sendError(ws, message) {
     send(ws, { type: 'auth_error', message });
 }
 
-function getUsersData() {
+async function getUsersData() {
     try {
-        return stmtGetAllUsers.all().map(u => ({
+        const rows = await stmtGetAllUsers.all();
+        return rows.map(u => ({
             username: u.username,
             displayName: u.displayName,
             avatar: u.avatar,
@@ -625,8 +573,8 @@ function getUsersData() {
     }
 }
 
-function broadcastUserList() {
-    const users = getUsersData();
+async function broadcastUserList() {
+    const users = await getUsersData();
     for (const { ws } of activeSockets.values()) {
         send(ws, { type: 'users_list', users });
         send(ws, { type: 'contacts_list', users });
@@ -657,8 +605,8 @@ function isDeletedForUser(msg, username) {
     return msg.deleted_for.split(',').includes(username);
 }
 
-function getCurrentUserStatus(username) {
-    const user = stmtGetUser.get(username);
+async function getCurrentUserStatus(username) {
+    const user = await stmtGetUser.get(username);
     if (!user) {
         return { exists: false, banned: false, restrictedUntil: 0, restricted: false };
     }
@@ -671,8 +619,8 @@ function getCurrentUserStatus(username) {
     };
 }
 
-function checkRestricted(ws, username) {
-    const status = getCurrentUserStatus(username);
+async function checkRestricted(ws, username) {
+    const status = await getCurrentUserStatus(username);
     if (!status.exists) {
         sendError(ws, 'Conta nao encontrada.');
         return true;
@@ -704,7 +652,7 @@ wss.on('connection', ws => {
     ws.on('pong', () => {
         ws.isAlive = true;
         if (currentUsername) {
-            stmtUpdateLastSeen.run(Date.now(), currentUsername);
+            stmtUpdateLastSeen.run(Date.now(), currentUsername).catch(() => {});
         }
     });
 
@@ -728,7 +676,7 @@ wss.on('connection', ws => {
                 case 'login': {
                     const user = await authenticateUser(data.username, data.password);
 
-                    if (maintenanceState.active && !isStaff(user.username)) {
+                    if (maintenanceState.active && !(await isStaff(user.username))) {
                         return send(ws, {
                             type: 'maintenance_active',
                             message: maintenanceState.message
@@ -753,7 +701,7 @@ wss.on('connection', ws => {
                         focused: true
                     });
 
-                    stmtUpdateLastSeen.run(Date.now(), currentUsername);
+                    await stmtUpdateLastSeen.run(Date.now(), currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -761,7 +709,7 @@ wss.on('connection', ws => {
                         credentials: { username: data.username, password: data.password }
                     });
 
-                    broadcastUserList();
+                    await broadcastUserList();
                     break;
                 }
 
@@ -776,7 +724,7 @@ wss.on('connection', ws => {
                         data.avatar
                     );
 
-                    if (maintenanceState.active && !isStaff(user.username)) {
+                    if (maintenanceState.active && !(await isStaff(user.username))) {
                         return send(ws, {
                             type: 'maintenance_active',
                             message: maintenanceState.message
@@ -792,7 +740,7 @@ wss.on('connection', ws => {
                         focused: true
                     });
 
-                    stmtUpdateLastSeen.run(Date.now(), currentUsername);
+                    await stmtUpdateLastSeen.run(Date.now(), currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -800,7 +748,7 @@ wss.on('connection', ws => {
                         credentials: { username: data.username, password: data.password }
                     });
 
-                    broadcastUserList();
+                    await broadcastUserList();
                     break;
                 }
 
@@ -820,7 +768,7 @@ wss.on('connection', ws => {
                 // ANNOUNCEMENTS & MAINTENANCE (WS CLIENT QUERY)
                 // --------------------
                 case 'get_announcements': {
-                    const items = stmtGetAnnouncements.all();
+                    const items = await stmtGetAnnouncements.all();
                     send(ws, {
                         type: 'announcements_list',
                         items
@@ -841,7 +789,7 @@ wss.on('connection', ws => {
                 // --------------------
                 case 'update_profile': {
                     if (!currentUsername) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const displayName = (data.displayName || '').trim().slice(0, 30);
                     const bio = (data.bio || '').trim().slice(0, 200);
@@ -854,7 +802,7 @@ wss.on('connection', ws => {
                         });
                     }
 
-                    stmtUpdateProfile.run(displayName, avatar, bio, currentUsername);
+                    await stmtUpdateProfile.run(displayName, avatar, bio, currentUsername);
                     const session = activeSockets.get(currentUsername);
                     if (session) session.displayName = displayName;
 
@@ -863,7 +811,7 @@ wss.on('connection', ws => {
                         user: { username: currentUsername, displayName, avatar, bio }
                     });
 
-                    broadcastUserList();
+                    await broadcastUserList();
                     break;
                 }
 
@@ -874,7 +822,7 @@ wss.on('connection', ws => {
                 case 'get_users':
                     send(ws, {
                         type: 'contacts_list',
-                        users: getUsersData()
+                        users: await getUsersData()
                     });
                     break;
 
@@ -883,7 +831,7 @@ wss.on('connection', ws => {
                 // --------------------
                 case 'chat_message': {
                     if (!currentUsername || !data.to) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const msgType = data.msg_type || 'text';
                     let content = (data.text || '').trim();
@@ -909,7 +857,7 @@ wss.on('connection', ws => {
 
                     const timestamp = Date.now();
                     const replyTo = data.reply_to ? Number(data.reply_to) : null;
-                    const info = stmtInsertMessage.run(
+                    const info = await stmtInsertMessage.run(
                         currentUsername,
                         data.to,
                         content,
@@ -921,7 +869,7 @@ wss.on('connection', ws => {
 
                     let replyPreview = null;
                     if (replyTo) {
-                        const orig = stmtGetMessageById.get(replyTo);
+                        const orig = await stmtGetMessageById.get(replyTo);
                         if (orig) {
                             replyPreview = {
                                 id: orig.id,
@@ -934,9 +882,11 @@ wss.on('connection', ws => {
                         }
                     }
 
+                    const lastId = info.lastInsertRowid || (info.rows && info.rows[0] && info.rows[0].id) || null;
+
                     const payload = {
                         type: 'chat_message',
-                        id: info.lastInsertRowid,
+                        id: lastId,
                         from: currentUsername,
                         to: data.to,
                         text: msgType === 'text' ? content : null,
@@ -959,7 +909,7 @@ wss.on('connection', ws => {
                             body: msgType === 'text' ? content.slice(0, 100) : `[${msgType}]`,
                             icon: '/icon.png',
                             data: { sender: currentUsername }
-                        });
+                        }).catch(() => {});
                     }
                     break;
                 }
@@ -969,13 +919,15 @@ wss.on('connection', ws => {
                 // --------------------
                 case 'edit_message': {
                     if (!currentUsername || !data.messageId || !data.text) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const text = String(data.text).trim().slice(0, 2000);
                     if (!text) return;
 
-                    const result = stmtEditMessage.run(text, data.messageId, currentUsername, Date.now());
-                    if (result.changes > 0) {
+                    const result = await stmtEditMessage.run(text, data.messageId, currentUsername, Date.now());
+                    const changed = (result.rowsAffected > 0) || (result.changes > 0);
+
+                    if (changed) {
                         const payload = {
                             type: 'message_edited',
                             messageId: data.messageId,
@@ -1002,7 +954,7 @@ wss.on('connection', ws => {
                 case 'mark_as_read': {
                     if (!currentUsername || !data.withUser) return;
 
-                    const readRows = stmtMarkAsRead.all(Date.now(), currentUsername, data.withUser);
+                    const readRows = await stmtMarkAsRead.all(Date.now(), currentUsername, data.withUser);
 
                     if (readRows && readRows.length > 0) {
                         const readIds = readRows.map(r => r.id);
@@ -1025,15 +977,15 @@ wss.on('connection', ws => {
                 // --------------------
                 case 'add_reaction': {
                     if (!currentUsername || !data.messageId || !data.emoji) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
-                    const msg = stmtGetMessageById.get(data.messageId);
+                    const msg = await stmtGetMessageById.get(data.messageId);
                     if (!msg || (msg.sender !== currentUsername && msg.receiver !== currentUsername)) {
                         return send(ws, { type: 'chat_error', message: 'Mensagem invalida ou sem permissao.' });
                     }
 
                     const timestamp = Date.now();
-                    stmtUpsertReaction.run(data.messageId, currentUsername, data.emoji, timestamp);
+                    await stmtUpsertReaction.run(data.messageId, currentUsername, data.emoji, timestamp);
 
                     const payload = {
                         type: 'reaction_updated',
@@ -1059,7 +1011,7 @@ wss.on('connection', ws => {
                     const { endpoint, keys } = data.subscription;
                     if (!endpoint || !keys || !keys.p256dh || !keys.auth) return;
 
-                    stmtUpsertPushSubscription.run(
+                    await stmtUpsertPushSubscription.run(
                         currentUsername,
                         endpoint,
                         keys.p256dh,
@@ -1074,50 +1026,49 @@ wss.on('connection', ws => {
                 // --------------------
                 case 'get_chat_history': {
                     if (!currentUsername || !data.withUser) return;
-                    const history = stmtGetChatHistory.all(
+                    const history = await stmtGetChatHistory.all(
                         currentUsername,
-                        data.withUser,
-                        data.withUser,
-                        currentUsername
+                        data.withUser
                     );
 
-                    const filtered = history
-                        .filter(m => !isDeletedForUser(m, currentUsername))
-                        .map(m => {
-                            let reply_preview = null;
-                            if (m.reply_to) {
-                                const orig = stmtGetMessageById.get(m.reply_to);
-                                if (orig) {
-                                    reply_preview = {
-                                        id: orig.id,
-                                        sender: orig.sender,
-                                        content: orig.msg_type === 'text'
-                                            ? (orig.content || '').slice(0, 80)
-                                            : '[' + orig.msg_type + ']',
-                                        msg_type: orig.msg_type
-                                    };
-                                }
+                    const filtered = [];
+                    for (const m of history) {
+                        if (isDeletedForUser(m, currentUsername)) continue;
+
+                        let reply_preview = null;
+                        if (m.reply_to) {
+                            const orig = await stmtGetMessageById.get(m.reply_to);
+                            if (orig) {
+                                reply_preview = {
+                                    id: orig.id,
+                                    sender: orig.sender,
+                                    content: orig.msg_type === 'text'
+                                        ? (orig.content || '').slice(0, 80)
+                                        : '[' + orig.msg_type + ']',
+                                    msg_type: orig.msg_type
+                                };
                             }
+                        }
 
-                            let reactions = [];
-                            try {
-                                reactions = stmtGetReactionsByMessage.all(m.id);
-                            } catch (e) {}
+                        let reactions = [];
+                        try {
+                            reactions = await stmtGetReactionsByMessage.all(m.id);
+                        } catch (e) {}
 
-                            return {
-                                id: m.id,
-                                sender: m.sender,
-                                content: m.deleted_for_all ? null : m.content,
-                                timestamp: m.timestamp,
-                                msg_type: m.msg_type || 'text',
-                                media_meta: m.media_meta ? JSON.parse(m.media_meta) : null,
-                                deleted_for_all: !!m.deleted_for_all,
-                                reply_to: m.reply_to,
-                                reply_preview,
-                                edited: !!m.edited,
-                                reactions
-                            };
+                        filtered.push({
+                            id: m.id,
+                            sender: m.sender,
+                            content: m.deleted_for_all ? null : m.content,
+                            timestamp: m.timestamp,
+                            msg_type: m.msg_type || 'text',
+                            media_meta: m.media_meta ? JSON.parse(m.media_meta) : null,
+                            deleted_for_all: !!m.deleted_for_all,
+                            reply_to: m.reply_to,
+                            reply_preview,
+                            edited: !!m.edited,
+                            reactions
                         });
+                    }
 
                     send(ws, {
                         type: 'chat_history',
@@ -1127,44 +1078,43 @@ wss.on('connection', ws => {
                     break;
                 }
 
+                // --------------------
+                // REMOVE REACTION
+                // --------------------
+                case 'remove_reaction': {
+                    if (!currentUsername || !data.messageId) return;
 
+                    const msg = await stmtGetMessageById.get(data.messageId);
+                    if (!msg || (msg.sender !== currentUsername && msg.receiver !== currentUsername)) return;
 
-                    // --------------------
-// REMOVE REACTION
-// --------------------
-case 'remove_reaction': {
-    if (!currentUsername || !data.messageId) return;
+                    await stmtRemoveReaction.run(data.messageId, currentUsername);
 
-    const msg = stmtGetMessageById.get(data.messageId);
-    if (!msg || (msg.sender !== currentUsername && msg.receiver !== currentUsername)) return;
+                    const payload = {
+                        type: 'reaction_removed',
+                        messageId: data.messageId,
+                        username: currentUsername
+                    };
 
-    stmtRemoveReaction.run(data.messageId, currentUsername);
+                    const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
+                    const targetSession = activeSockets.get(targetUser);
 
-    const payload = {
-        type: 'reaction_removed',
-        messageId: data.messageId,
-        username: currentUsername
-    };
+                    if (targetSession) send(targetSession.ws, payload);
+                    send(ws, payload);
+                    break;
+                }
 
-    const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
-    const targetSession = activeSockets.get(targetUser);
-
-    if (targetSession) send(targetSession.ws, payload);
-    send(ws, payload);
-    break;
-}
-                    
                 // --------------------
                 // DELETE MESSAGE
                 // --------------------
                 case 'delete_message': {
                     if (!currentUsername || !data.messageId) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const forAll = !!data.forAll;
                     if (forAll) {
-                        const r = stmtDeleteForAll.run(data.messageId, currentUsername);
-                        if (r.changes > 0) {
+                        const r = await stmtDeleteForAll.run(data.messageId, currentUsername);
+                        const changed = (r.rowsAffected > 0) || (r.changes > 0);
+                        if (changed) {
                             const payload = {
                                 type: 'message_deleted',
                                 messageId: data.messageId,
@@ -1178,7 +1128,7 @@ case 'remove_reaction': {
                             }
                         }
                     } else {
-                        stmtSoftDeleteForUser.run(
+                        await stmtSoftDeleteForUser.run(
                             currentUsername,
                             currentUsername,
                             currentUsername,
@@ -1199,11 +1149,11 @@ case 'remove_reaction': {
                 // --------------------
                 case 'delete_conversation': {
                     if (!currentUsername || !data.withUser) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const forAll = !!data.forAll;
                     if (forAll) {
-                        stmtDeleteConversationForAll.run(
+                        await stmtDeleteConversationForAll.run(
                             currentUsername,
                             data.withUser,
                             data.withUser,
@@ -1220,7 +1170,7 @@ case 'remove_reaction': {
                         const t = activeSockets.get(data.withUser);
                         if (t) send(t.ws, payload);
                     } else {
-                        stmtDeleteConversationForUser.run(
+                        await stmtDeleteConversationForUser.run(
                             currentUsername,
                             currentUsername,
                             currentUsername,
@@ -1245,7 +1195,7 @@ case 'remove_reaction': {
                 case 'call_initiate':
                 case 'call_user': {
                     if (!currentUsername) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const targetUsername = data.callee || data.to;
                     const callee = activeSockets.get(targetUsername);
@@ -1277,7 +1227,7 @@ case 'remove_reaction': {
                 case 'call_answer':
                 case 'call_response': {
                     if (!currentUsername) return;
-                    if (checkRestricted(ws, currentUsername)) return;
+                    if (await checkRestricted(ws, currentUsername)) return;
 
                     const targetUsername = data.caller || data.to;
                     const caller = activeSockets.get(targetUsername);
@@ -1346,20 +1296,42 @@ case 'remove_reaction': {
 
     ws.on('close', () => {
         if (currentUsername) {
-            stmtUpdateLastSeen.run(Date.now(), currentUsername);
+            stmtUpdateLastSeen.run(Date.now(), currentUsername).catch(() => {});
             endUserCall(currentUsername);
             activeSockets.delete(currentUsername);
-            broadcastUserList();
+            broadcastUserList().catch(() => {});
         }
     });
 });
 
 // ============================================================
-// START
+// START (assíncrono – espera o schema do Turso)
 // ============================================================
 
-server.listen(PORT, () => {
-    console.log('ZapZap na porta ' + PORT);
-    console.log('[ADMIN] ' + (ADMIN_PASSWORD ? 'Painel administrativo ativado.' : 'ADMIN_PASSWORD nao configurada.'));
-    console.log('[DB] ' + dbPath);
-});
+async function startServer() {
+    try {
+        console.log('[START] Inicializando banco Turso...');
+        await initDb();
+
+        // Carrega o estado de manutenção só depois das tabelas existirem
+        try {
+            const row = await stmtGetSetting.get('maintenance');
+            if (row && row.value) {
+                maintenanceState = JSON.parse(row.value);
+            }
+        } catch (e) {
+            console.warn('[START] Não foi possível carregar maintenance (usando padrão):', e.message);
+        }
+
+        server.listen(PORT, () => {
+            console.log('ZapZap na porta ' + PORT);
+            console.log('[ADMIN] ' + (ADMIN_PASSWORD ? 'Painel administrativo ativado.' : 'ADMIN_PASSWORD nao configurada.'));
+            console.log('[DB] ' + dbPath);
+        });
+    } catch (err) {
+        console.error('[START] Falha crítica ao inicializar o servidor:', err);
+        process.exit(1);
+    }
+}
+
+startServer();

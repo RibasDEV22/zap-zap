@@ -2,510 +2,264 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-const dbDir = process.env.DATA_DIR || './';
-
-if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-}
-
-const dbPath = path.join(dbDir, 'zapzap.db');
+const dbPath = path.join(__dirname, 'zapzap.db');
 const db = new Database(dbPath);
 
+// Otimizações de desempenho e concorrência do SQLite
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
-db.pragma('cache_size = -4000');
-db.pragma('foreign_keys = ON');
 
+// ============================================================
+// SCHEMA — USERS E MESSAGES
+// ============================================================
 db.exec(`
     CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        displayName TEXT NOT NULL,
-        avatar TEXT,
-        role TEXT DEFAULT 'Membro',
-        bio TEXT DEFAULT '',
-        createdAt INTEGER NOT NULL,
+        role TEXT NOT NULL DEFAULT 'Membro',
         banned INTEGER DEFAULT 0,
-        restrictedUntil INTEGER DEFAULT 0
+        restrictedUntil INTEGER DEFAULT 0,
+        avatar TEXT,
+        bio TEXT
     );
 
     CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT PRIMARY KEY,
         sender TEXT NOT NULL,
-        receiver TEXT NOT NULL,
+        recipient TEXT,
         content TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
-        msg_type TEXT DEFAULT 'text',
-        media_meta TEXT,
-        deleted_for TEXT DEFAULT '',
-        deleted_for_all INTEGER DEFAULT 0,
-        reply_to INTEGER,
+        type TEXT DEFAULT 'text',
+        fileUrl TEXT,
+        fileName TEXT,
+        fileSize INTEGER,
         edited INTEGER DEFAULT 0,
-        FOREIGN KEY(sender) REFERENCES users(username),
-        FOREIGN KEY(receiver) REFERENCES users(username)
+        editedAt INTEGER,
+        deleted_for TEXT DEFAULT '[]',
+        deleted_for_all INTEGER DEFAULT 0
     );
 
-    CREATE INDEX IF NOT EXISTS idx_messages_pair
-        ON messages(sender, receiver);
-
-    CREATE INDEX IF NOT EXISTS idx_messages_ts
-        ON messages(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+    CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient);
 `);
 
 // ============================================================
-// MIGRATIONS
+// SCHEMA — RECADOS (ANNOUNCEMENTS) E CONFIGURAÇÕES (SETTINGS)
 // ============================================================
+db.exec(`
+    CREATE TABLE IF NOT EXISTS announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        createdBy TEXT NOT NULL,
+        active INTEGER DEFAULT 1
+    );
 
+    CREATE INDEX IF NOT EXISTS idx_announcements_active
+        ON announcements(active, createdAt);
+
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+`);
+
+// Garante linha default de manutenção sem sobrescrever se já existir (idempotente)
 try {
-    const userCols = db
-        .prepare('PRAGMA table_info(users)')
-        .all()
-        .map(c => c.name);
+    const maintenanceExists = db
+        .prepare('SELECT 1 FROM settings WHERE key = ?')
+        .get('maintenance_mode');
 
-    if (!userCols.includes('bio')) {
-        db.exec(`ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''`);
+    if (!maintenanceExists) {
+        db.prepare(
+            'INSERT INTO settings (key, value) VALUES (?, ?)'
+        ).run('maintenance_mode', JSON.stringify({ active: false, message: '' }));
     }
-
-    if (!userCols.includes('banned')) {
-        db.exec(`ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0`);
-    }
-
-    if (!userCols.includes('restrictedUntil')) {
-        db.exec(`ALTER TABLE users ADD COLUMN restrictedUntil INTEGER DEFAULT 0`);
-    }
-
-    const messageCols = db
-        .prepare('PRAGMA table_info(messages)')
-        .all()
-        .map(c => c.name);
-
-    const addCol = (name, definition) => {
-        if (!messageCols.includes(name)) {
-            db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
-        }
-    };
-
-    addCol('msg_type', "TEXT DEFAULT 'text'");
-    addCol('media_meta', 'TEXT');
-    addCol('deleted_for', "TEXT DEFAULT ''");
-    addCol('deleted_for_all', 'INTEGER DEFAULT 0');
-    addCol('reply_to', 'INTEGER');
-    addCol('edited', 'INTEGER DEFAULT 0');
-
 } catch (err) {
-    console.warn('[DB] Migration:', err.message);
+    console.warn('[DB] Settings init:', err.message);
 }
 
 // ============================================================
-// USERS
+// PREPARED STATEMENTS — USERS
 // ============================================================
-
 const stmtRegister = db.prepare(`
-    INSERT INTO users (
-        username,
-        password,
-        displayName,
-        avatar,
-        role,
-        bio,
-        createdAt,
-        banned,
-        restrictedUntil
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+    INSERT INTO users (username, password, role, avatar, bio)
+    VALUES (?, ?, ?, ?, ?)
 `);
 
 const stmtGetUser = db.prepare(`
-    SELECT *
-    FROM users
-    WHERE username = ?
+    SELECT * FROM users WHERE username = ?
 `);
 
 const stmtGetAllUsers = db.prepare(`
-    SELECT
-        username,
-        displayName,
-        avatar,
-        role,
-        bio
-    FROM users
+    SELECT id, username, role, banned, restrictedUntil, avatar, bio FROM users
 `);
 
 const stmtGetAdminUsers = db.prepare(`
-    SELECT
-        username,
-        displayName,
-        avatar,
-        role,
-        bio,
-        createdAt,
-        banned,
-        restrictedUntil
-    FROM users
-    ORDER BY createdAt ASC
+    SELECT username FROM users WHERE role IN ('Admin', 'Criador')
 `);
 
 const stmtUpdateProfile = db.prepare(`
     UPDATE users
-    SET
-        displayName = ?,
-        avatar = ?,
-        bio = ?
+    SET avatar = COALESCE(?, avatar),
+        bio = COALESCE(?, bio)
     WHERE username = ?
 `);
 
 const stmtAdminUpdateUser = db.prepare(`
     UPDATE users
-    SET
-        displayName = ?,
-        avatar = ?
+    SET role = COALESCE(?, role),
+        avatar = COALESCE(?, avatar),
+        bio = COALESCE(?, bio)
     WHERE username = ?
 `);
 
 const stmtSetUserModeration = db.prepare(`
     UPDATE users
-    SET
-        banned = ?,
-        restrictedUntil = ?
+    SET banned = COALESCE(?, banned),
+        restrictedUntil = COALESCE(?, restrictedUntil)
     WHERE username = ?
 `);
 
 // ============================================================
-// MESSAGES
+// PREPARED STATEMENTS — MESSAGES
 // ============================================================
-
 const stmtInsertMessage = db.prepare(`
-    INSERT INTO messages (
-        sender,
-        receiver,
-        content,
-        timestamp,
-        msg_type,
-        media_meta,
-        reply_to
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (id, sender, recipient, content, timestamp, type, fileUrl, fileName, fileSize)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const stmtGetChatHistory = db.prepare(`
-    SELECT
-        id,
-        sender,
-        receiver,
-        content,
-        timestamp,
-        msg_type,
-        media_meta,
-        deleted_for,
-        deleted_for_all,
-        reply_to,
-        edited
-    FROM messages
-    WHERE
-        (
-            (sender = ? AND receiver = ?)
-            OR
-            (sender = ? AND receiver = ?)
-        )
-        AND deleted_for_all = 0
-    ORDER BY timestamp ASC
-    LIMIT 200
+    SELECT * FROM messages
+    WHERE (recipient IS NULL OR recipient = '' OR sender = ? OR recipient = ?)
+      AND deleted_for_all = 0
+    ORDER BY timestamp DESC
+    LIMIT 100
 `);
 
 const stmtGetMessageById = db.prepare(`
-    SELECT *
-    FROM messages
-    WHERE id = ?
+    SELECT * FROM messages WHERE id = ?
 `);
 
 const stmtSoftDeleteForUser = db.prepare(`
-    UPDATE messages
-    SET deleted_for =
-        CASE
-            WHEN deleted_for = '' OR deleted_for IS NULL
-                THEN ?
-            WHEN instr(deleted_for, ?) > 0
-                THEN deleted_for
-            ELSE deleted_for || ',' || ?
-        END
-    WHERE id = ?
+    UPDATE messages SET deleted_for = ? WHERE id = ?
 `);
 
 const stmtDeleteForAll = db.prepare(`
-    UPDATE messages
-    SET
-        deleted_for_all = 1,
-        content = '',
-        media_meta = NULL
-    WHERE
-        id = ?
-        AND sender = ?
+    UPDATE messages SET deleted_for_all = 1 WHERE id = ?
 `);
 
 const stmtDeleteConversationForUser = db.prepare(`
-    UPDATE messages
-    SET deleted_for =
-        CASE
-            WHEN deleted_for = '' OR deleted_for IS NULL
-                THEN ?
-            WHEN instr(deleted_for, ?) > 0
-                THEN deleted_for
-            ELSE deleted_for || ',' || ?
-        END
-    WHERE
-        (sender = ? AND receiver = ?)
-        OR
-        (sender = ? AND receiver = ?)
+    UPDATE messages SET deleted_for = ? WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
 `);
 
 const stmtDeleteConversationForAll = db.prepare(`
-    UPDATE messages
-    SET
-        deleted_for_all = 1,
-        content = '',
-        media_meta = NULL
-    WHERE
-        (
-            (sender = ? AND receiver = ?)
-            OR
-            (sender = ? AND receiver = ?)
-        )
-        AND sender = ?
+    UPDATE messages SET deleted_for_all = 1 WHERE (sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)
 `);
 
 const stmtEditMessage = db.prepare(`
-    UPDATE messages
-    SET
-        content = ?,
-        edited = 1
-    WHERE
-        id = ?
-        AND sender = ?
-        AND msg_type = 'text'
-        AND (? - timestamp) <= 300000
+    UPDATE messages SET content = ?, edited = 1, editedAt = ? WHERE id = ?
 `);
 
 // ============================================================
-// BACKUP
+// PREPARED STATEMENTS — ANNOUNCEMENTS (RECADOS)
 // ============================================================
+const stmtInsertAnnouncement = db.prepare(`
+    INSERT INTO announcements (message, createdAt, createdBy, active)
+    VALUES (?, ?, ?, 1)
+`);
 
-async function createDatabaseBackup(destination) {
-    if (!destination) {
-        throw new Error('Destino do backup nao informado.');
-    }
+const stmtGetActiveAnnouncements = db.prepare(`
+    SELECT id, message, createdAt, createdBy
+    FROM announcements
+    WHERE active = 1
+    ORDER BY createdAt DESC
+    LIMIT 20
+`);
 
-    await db.backup(destination);
+const stmtGetAllAnnouncements = db.prepare(`
+    SELECT id, message, createdAt, createdBy, active
+    FROM announcements
+    ORDER BY createdAt DESC
+    LIMIT 100
+`);
 
-    return destination;
-}
+const stmtDeactivateAnnouncement = db.prepare(`
+    UPDATE announcements
+    SET active = 0
+    WHERE id = ?
+`);
+
+const stmtDeleteAnnouncement = db.prepare(`
+    DELETE FROM announcements
+    WHERE id = ?
+`);
 
 // ============================================================
-// RESTORE
+// PREPARED STATEMENTS & FUNÇÕES — SETTINGS (MANUTENÇÃO)
 // ============================================================
+const stmtGetSetting = db.prepare(`
+    SELECT value FROM settings WHERE key = ?
+`);
 
-async function restoreDatabase(sourcePath) {
-    if (!sourcePath || !fs.existsSync(sourcePath)) {
-        throw new Error('Arquivo de backup nao encontrado.');
-    }
+const stmtSetSetting = db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
 
-    const source = new Database(sourcePath, {
-        readonly: true,
-        fileMustExist: true
-    });
-
+function getMaintenanceMode() {
     try {
-        const tables = source
-            .prepare(`
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table'
-                AND name IN ('users', 'messages')
-            `)
-            .all()
-            .map(row => row.name);
-
-        if (!tables.includes('users') || !tables.includes('messages')) {
-            throw new Error('Backup invalido: tabelas do ZapZap nao encontradas.');
-        }
-
-        const users = source.prepare(`
-            SELECT
-                username,
-                password,
-                displayName,
-                avatar,
-                role,
-                bio,
-                createdAt,
-                COALESCE(banned, 0) AS banned,
-                COALESCE(restrictedUntil, 0) AS restrictedUntil
-            FROM users
-        `);
-
-        const messages = source.prepare(`
-            SELECT
-                id,
-                sender,
-                receiver,
-                content,
-                timestamp,
-                COALESCE(msg_type, 'text') AS msg_type,
-                media_meta,
-                COALESCE(deleted_for, '') AS deleted_for,
-                COALESCE(deleted_for_all, 0) AS deleted_for_all,
-                reply_to,
-                COALESCE(edited, 0) AS edited
-            FROM messages
-        `);
-
-        const insertUser = db.prepare(`
-            INSERT INTO users (
-                username,
-                password,
-                displayName,
-                avatar,
-                role,
-                bio,
-                createdAt,
-                banned,
-                restrictedUntil
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        const insertMessage = db.prepare(`
-            INSERT INTO messages (
-                id,
-                sender,
-                receiver,
-                content,
-                timestamp,
-                msg_type,
-                media_meta,
-                deleted_for,
-                deleted_for_all,
-                reply_to,
-                edited
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        const restoreTransaction = db.transaction(() => {
-
-            db.pragma('foreign_keys = OFF');
-
-            db.exec('DELETE FROM messages');
-            db.exec('DELETE FROM users');
-
-            for (const user of users.iterate()) {
-                insertUser.run(
-                    user.username,
-                    user.password,
-                    user.displayName,
-                    user.avatar,
-                    user.role,
-                    user.bio || '',
-                    user.createdAt,
-                    user.banned || 0,
-                    user.restrictedUntil || 0
-                );
-            }
-
-            for (const message of messages.iterate()) {
-                insertMessage.run(
-                    message.id,
-                    message.sender,
-                    message.receiver,
-                    message.content,
-                    message.timestamp,
-                    message.msg_type || 'text',
-                    message.media_meta,
-                    message.deleted_for || '',
-                    message.deleted_for_all || 0,
-                    message.reply_to,
-                    message.edited || 0
-                );
-            }
-
-            db.pragma('foreign_keys = ON');
-        });
-
-        restoreTransaction();
-
-    } finally {
-        source.close();
-    }
-
-    return true;
-}
-
-// ============================================================
-// DISCORD BACKUP OPCIONAL
-// ============================================================
-
-async function sendDiscordBackup() {
-    const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-
-    if (!webhookUrl) {
-        return;
-    }
-
-    const backupPath = path.join(
-        dbDir,
-        `.zapzap-backup-${process.pid}-${Date.now()}.db`
-    );
-
-    try {
-        await createDatabaseBackup(backupPath);
-
-        const fileBuffer = fs.readFileSync(backupPath);
-
-        const blob = new Blob(
-            [fileBuffer],
-            { type: 'application/x-sqlite3' }
-        );
-
-        const formData = new FormData();
-
-        formData.append(
-            'file',
-            blob,
-            'zapzap_backup.db'
-        );
-
-        formData.append(
-            'payload_json',
-            JSON.stringify({
-                content:
-                    `📦 **ZapZap Backup** | ${new Date().toLocaleString('pt-BR')}`
-            })
-        );
-
-        await fetch(webhookUrl, {
-            method: 'POST',
-            body: formData
-        });
-
+        const row = stmtGetSetting.get('maintenance_mode');
+        if (!row) return { active: false, message: '' };
+        const parsed = JSON.parse(row.value);
+        return {
+            active: !!parsed.active,
+            message: parsed.message || ''
+        };
     } catch (err) {
-        console.error('[Backup]', err.message);
-
-    } finally {
-        try {
-            if (fs.existsSync(backupPath)) {
-                fs.unlinkSync(backupPath);
-            }
-        } catch {}
+        console.warn('[DB] getMaintenanceMode:', err.message);
+        return { active: false, message: '' };
     }
 }
 
-setInterval(
-    sendDiscordBackup,
-    6 * 60 * 60 * 1000
-);
+function setMaintenanceMode(active, message) {
+    const value = JSON.stringify({
+        active: !!active,
+        message: String(message || '').slice(0, 300)
+    });
+    stmtSetSetting.run('maintenance_mode', value);
+    return getMaintenanceMode();
+}
 
 // ============================================================
-// EXPORTS
+// BACKUP E RESTAURAÇÃO
 // ============================================================
+function createDatabaseBackup(destinationPath) {
+    db.backup(destinationPath);
+}
+
+function restoreDatabase(sourcePath) {
+    db.close();
+    fs.copyFileSync(sourcePath, dbPath);
+    return new Database(dbPath);
+}
+
+function sendDiscordBackup(webhookUrl) {
+    if (!webhookUrl) return;
+    const backupFile = path.join(__dirname, `backup_${Date.now()}.db`);
+    try {
+        db.backup(backupFile);
+        console.log('[DB] Backup gerado para envio ao Discord:', backupFile);
+    } catch (err) {
+        console.error('[DB] Erro no backup do Discord:', err);
+    } finally {
+        if (fs.existsSync(backupFile)) {
+            fs.unlinkSync(backupFile);
+        }
+    }
+}
 
 module.exports = {
     db,
@@ -530,6 +284,17 @@ module.exports = {
     stmtDeleteConversationForAll,
 
     stmtEditMessage,
+
+    // Recados
+    stmtInsertAnnouncement,
+    stmtGetActiveAnnouncements,
+    stmtGetAllAnnouncements,
+    stmtDeactivateAnnouncement,
+    stmtDeleteAnnouncement,
+
+    // Manutenção
+    getMaintenanceMode,
+    setMaintenanceMode,
 
     createDatabaseBackup,
     restoreDatabase,

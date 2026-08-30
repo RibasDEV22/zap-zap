@@ -5,6 +5,14 @@ const path = require('path');
 const os = require('os');
 
 const { WebSocketServer, WebSocket } = require('ws');
+
+let webPush = null;
+try {
+    webPush = require('web-push');
+} catch (e) {
+    console.warn('[PUSH] Módulo web-push não instalado. Notificações nativas offline ficarão desativadas.');
+}
+
 const { authenticateUser, registerUser } = require('./auth');
 const {
     stmtGetAllUsers,
@@ -26,6 +34,13 @@ const {
     stmtDeactivateAnnouncement,
     stmtGetSetting,
     stmtSetSetting,
+    stmtMarkAsRead,
+    stmtUpsertReaction,
+    stmtGetReactionsByMessage,
+    stmtUpdateLastSeen,
+    stmtUpsertPushSubscription,
+    stmtGetPushSubscriptionsByUser,
+    stmtDeletePushSubscriptionByEndpoint,
     db,
     dbPath,
     createDatabaseBackup,
@@ -39,6 +54,14 @@ const MAX_MEDIA_BASE64 = 2.8 * 1024 * 1024;
 const MAX_ADMIN_BODY = 110 * 1024 * 1024;
 const ADMIN_SESSION_TIME = 24 * 60 * 60 * 1000;
 const ADMIN_HTML_PATH = path.join(__dirname, 'admin.html');
+
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@zapzap.local';
+
+if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+    webPush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 const activeSockets = new Map();
 const adminSessions = new Map();
@@ -71,7 +94,6 @@ function setMaintenanceMode(active, message) {
     stmtSetSetting.run('maintenance', JSON.stringify(maintenanceState));
 
     if (maintenanceState.active) {
-        // Encerra imediatamente as conexões ativas de membros comuns
         for (const [username, session] of activeSockets.entries()) {
             if (!isStaff(username)) {
                 send(session.ws, {
@@ -98,8 +120,38 @@ function setMaintenanceMode(active, message) {
 }
 
 // ============================================================
-// HELPERS HTTP
+// HELPERS HTTP & WEB PUSH
 // ============================================================
+
+function sendPushNotification(targetUsername, payload) {
+    if (!webPush || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+
+    try {
+        const subscriptions = stmtGetPushSubscriptionsByUser.all(targetUsername);
+        if (!subscriptions || subscriptions.length === 0) return;
+
+        const pushData = JSON.stringify(payload);
+
+        subscriptions.forEach(sub => {
+            const pushConfig = {
+                endpoint: sub.endpoint,
+                keys: {
+                    p256dh: sub.p256dh,
+                    auth: sub.auth
+                }
+            };
+
+            webPush.sendNotification(pushConfig, pushData)
+                .catch(err => {
+                    if (err.statusCode === 410 || err.statusCode === 404) {
+                        stmtDeletePushSubscriptionByEndpoint.run(sub.endpoint);
+                    }
+                });
+        });
+    } catch (err) {
+        console.error('[PUSH ERROR]', err.message);
+    }
+}
 
 function sendJson(res, status, data) {
     res.writeHead(status, {
@@ -564,7 +616,8 @@ function getUsersData() {
             avatar: u.avatar,
             role: u.role,
             bio: u.bio || '',
-            online: activeSockets.has(u.username)
+            online: activeSockets.has(u.username),
+            last_seen: u.last_seen || 0
         }));
     } catch {
         return [];
@@ -645,9 +698,14 @@ function checkRestricted(ws, username) {
 
 wss.on('connection', ws => {
     ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
-
     let currentUsername = null;
+
+    ws.on('pong', () => {
+        ws.isAlive = true;
+        if (currentUsername) {
+            stmtUpdateLastSeen.run(Date.now(), currentUsername);
+        }
+    });
 
     ws.on('message', async raw => {
         let data;
@@ -690,8 +748,11 @@ wss.on('connection', ws => {
                         ws,
                         displayName: user.displayName,
                         isBusy: false,
-                        callTarget: null
+                        callTarget: null,
+                        focused: true
                     });
+
+                    stmtUpdateLastSeen.run(Date.now(), currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -726,8 +787,11 @@ wss.on('connection', ws => {
                         ws,
                         displayName: user.displayName,
                         isBusy: false,
-                        callTarget: null
+                        callTarget: null,
+                        focused: true
                     });
+
+                    stmtUpdateLastSeen.run(Date.now(), currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -736,6 +800,18 @@ wss.on('connection', ws => {
                     });
 
                     broadcastUserList();
+                    break;
+                }
+
+                // --------------------
+                // APP VISIBILITY
+                // --------------------
+                case 'app_visibility': {
+                    if (!currentUsername) return;
+                    const session = activeSockets.get(currentUsername);
+                    if (session) {
+                        session.focused = !!data.focused;
+                    }
                     break;
                 }
 
@@ -875,6 +951,15 @@ wss.on('connection', ws => {
                     const targetSession = activeSockets.get(data.to);
                     if (targetSession) send(targetSession.ws, payload);
                     send(ws, Object.assign({}, payload, { confirmed: true }));
+
+                    if (!targetSession || !targetSession.focused) {
+                        sendPushNotification(data.to, {
+                            title: `Nova mensagem de @${currentUsername}`,
+                            body: msgType === 'text' ? content.slice(0, 100) : `[${msgType}]`,
+                            icon: '/icon.png',
+                            data: { sender: currentUsername }
+                        });
+                    }
                     break;
                 }
 
@@ -911,6 +996,79 @@ wss.on('connection', ws => {
                 }
 
                 // --------------------
+                // MARK AS READ
+                // --------------------
+                case 'mark_as_read': {
+                    if (!currentUsername || !data.withUser) return;
+
+                    const readRows = stmtMarkAsRead.all(Date.now(), currentUsername, data.withUser);
+
+                    if (readRows && readRows.length > 0) {
+                        const readIds = readRows.map(r => r.id);
+                        const payload = {
+                            type: 'messages_read',
+                            withUser: currentUsername,
+                            ids: readIds
+                        };
+
+                        const senderSession = activeSockets.get(data.withUser);
+                        if (senderSession) {
+                            send(senderSession.ws, payload);
+                        }
+                    }
+                    break;
+                }
+
+                // --------------------
+                // ADD REACTION
+                // --------------------
+                case 'add_reaction': {
+                    if (!currentUsername || !data.messageId || !data.emoji) return;
+                    if (checkRestricted(ws, currentUsername)) return;
+
+                    const msg = stmtGetMessageById.get(data.messageId);
+                    if (!msg || (msg.sender !== currentUsername && msg.receiver !== currentUsername)) {
+                        return send(ws, { type: 'chat_error', message: 'Mensagem invalida ou sem permissao.' });
+                    }
+
+                    const timestamp = Date.now();
+                    stmtUpsertReaction.run(data.messageId, currentUsername, data.emoji, timestamp);
+
+                    const payload = {
+                        type: 'reaction_updated',
+                        messageId: data.messageId,
+                        username: currentUsername,
+                        emoji: data.emoji,
+                        timestamp
+                    };
+
+                    const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
+                    const targetSession = activeSockets.get(targetUser);
+
+                    if (targetSession) send(targetSession.ws, payload);
+                    send(ws, payload);
+                    break;
+                }
+
+                // --------------------
+                // PUSH SUBSCRIPTION
+                // --------------------
+                case 'save_push_subscription': {
+                    if (!currentUsername || !data.subscription) return;
+                    const { endpoint, keys } = data.subscription;
+                    if (!endpoint || !keys || !keys.p256dh || !keys.auth) return;
+
+                    stmtUpsertPushSubscription.run(
+                        currentUsername,
+                        endpoint,
+                        keys.p256dh,
+                        keys.auth,
+                        Date.now()
+                    );
+                    break;
+                }
+
+                // --------------------
                 // HISTORY
                 // --------------------
                 case 'get_chat_history': {
@@ -939,6 +1097,12 @@ wss.on('connection', ws => {
                                     };
                                 }
                             }
+
+                            let reactions = [];
+                            try {
+                                reactions = stmtGetReactionsByMessage.all(m.id);
+                            } catch (e) {}
+
                             return {
                                 id: m.id,
                                 sender: m.sender,
@@ -949,7 +1113,8 @@ wss.on('connection', ws => {
                                 deleted_for_all: !!m.deleted_for_all,
                                 reply_to: m.reply_to,
                                 reply_preview,
-                                edited: !!m.edited
+                                edited: !!m.edited,
+                                reactions
                             };
                         });
 
@@ -1047,45 +1212,60 @@ wss.on('connection', ws => {
                 }
 
                 // --------------------
-                // CALL
+                // CALL (WEBRTC SIGNALING)
                 // --------------------
-                case 'call_initiate': {
+                case 'call_initiate':
+                case 'call_user': {
                     if (!currentUsername) return;
                     if (checkRestricted(ws, currentUsername)) return;
 
-                    const callee = activeSockets.get(data.callee);
+                    const targetUsername = data.callee || data.to;
+                    const callee = activeSockets.get(targetUsername);
                     const caller = activeSockets.get(currentUsername);
 
                     if (!callee) {
-                        return send(ws, { type: 'call_offline', callee: data.callee });
+                        return send(ws, { type: 'call_offline', callee: targetUsername });
                     }
 
-                    if (callee.isBusy) {
+                    if (callee.isBusy || caller.isBusy) {
                         return send(ws, { type: 'call_error', message: 'Usuario ocupado.' });
                     }
 
                     caller.isBusy = true;
-                    caller.callTarget = data.callee;
+                    caller.callTarget = targetUsername;
+                    callee.isBusy = true;
+                    callee.callTarget = currentUsername;
 
                     send(callee.ws, {
                         type: 'call_incoming',
                         caller: currentUsername,
                         callerDisplayName: caller.displayName,
-                        offer: data.offer
+                        offer: data.offer || data.signal,
+                        isVideo: !!data.isVideo
                     });
                     break;
                 }
 
-                case 'call_answer': {
+                case 'call_answer':
+                case 'call_response': {
                     if (!currentUsername) return;
                     if (checkRestricted(ws, currentUsername)) return;
 
-                    const caller = activeSockets.get(data.caller);
+                    const targetUsername = data.caller || data.to;
+                    const caller = activeSockets.get(targetUsername);
                     const answerer = activeSockets.get(currentUsername);
+
+                    if (data.accepted === false) {
+                        endUserCall(currentUsername);
+                        if (caller) {
+                            send(caller.ws, { type: 'call_rejected', from: currentUsername });
+                        }
+                        break;
+                    }
 
                     if (answerer) {
                         answerer.isBusy = true;
-                        answerer.callTarget = data.caller;
+                        answerer.callTarget = targetUsername;
                     }
 
                     if (caller) {
@@ -1094,7 +1274,7 @@ wss.on('connection', ws => {
                         send(caller.ws, {
                             type: 'call_answered',
                             answerer: currentUsername,
-                            answer: data.answer
+                            answer: data.answer || data.signal
                         });
                     }
                     break;
@@ -1102,18 +1282,20 @@ wss.on('connection', ws => {
 
                 case 'call_reject': {
                     if (!currentUsername) return;
-                    const caller = activeSockets.get(data.caller);
+                    const targetUsername = data.caller || data.to;
+                    endUserCall(currentUsername);
+                    const caller = activeSockets.get(targetUsername);
                     if (caller) {
-                        caller.isBusy = false;
-                        caller.callTarget = null;
                         send(caller.ws, { type: 'call_rejected', from: currentUsername });
                     }
                     break;
                 }
 
-                case 'call_ice_candidate': {
+                case 'call_ice_candidate':
+                case 'ice_candidate': {
                     if (!currentUsername) return;
-                    const t = activeSockets.get(data.to);
+                    const targetUsername = data.to;
+                    const t = activeSockets.get(targetUsername);
                     if (t) {
                         send(t.ws, {
                             type: 'call_ice_candidate',
@@ -1125,6 +1307,7 @@ wss.on('connection', ws => {
                 }
 
                 case 'call_end':
+                case 'end_call':
                     if (currentUsername) endUserCall(currentUsername);
                     break;
             }
@@ -1135,6 +1318,7 @@ wss.on('connection', ws => {
 
     ws.on('close', () => {
         if (currentUsername) {
+            stmtUpdateLastSeen.run(Date.now(), currentUsername);
             endUserCall(currentUsername);
             activeSockets.delete(currentUsername);
             broadcastUserList();

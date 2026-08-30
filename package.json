@@ -1,7 +1,7 @@
 {
   "name": "zapzap-app",
   "version": "5.1.0",
-  "description": "Chat de grupo em tempo real (Anda Mãe Vamos Mãe) com WebSockets, SQLite e Backup no Google Drive.",
+  "description": "Chat de grupo em tempo real com WebSockets, SQLite, Web Push e Painel Administrativo.",
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=256 server.js",
@@ -10,7 +10,7 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.8.0",
-    "googleapis": "^144.0.0",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   },
   "engines": {

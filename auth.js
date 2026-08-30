@@ -11,9 +11,7 @@ const MAX_AVATAR_SIZE = 400 * 1024;
 class AuthError extends Error {}
 
 function validateCredentials(username, password) {
-    const cleanUser = (username || '')
-        .toLowerCase()
-        .trim();
+    const cleanUser = (username || '').toLowerCase().trim();
 
     if (!USERNAME_REGEX.test(cleanUser)) {
         throw new AuthError(
@@ -22,9 +20,7 @@ function validateCredentials(username, password) {
     }
 
     if (typeof password !== 'string' || password.length < 6) {
-        throw new AuthError(
-            'A senha deve ter no minimo 6 caracteres.'
-        );
+        throw new AuthError('A senha deve ter no minimo 6 caracteres.');
     }
 
     return cleanUser;
@@ -52,7 +48,12 @@ async function registerUser(username, password, displayName, avatar) {
         throw new AuthError('Foto de perfil muito grande. Escolha uma imagem menor.');
     }
 
-    // Usando Transação atômica para evitar Race Condition na definição do Criador
+    // bcrypt.hash é a única parte assíncrona — precisa acontecer ANTES
+    // da transação, para que checagem + insert fiquem 100% atômicos.
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const now = Date.now();
+    const finalDisplayName = (displayName || cleanUser).trim().slice(0, 30);
+
     const registerTx = db.transaction(() => {
         const existing = stmtGetUser.get(cleanUser);
         if (existing) {
@@ -67,6 +68,8 @@ async function registerUser(username, password, displayName, avatar) {
                 ? 'Admin'
                 : 'Membro';
 
+        stmtRegister.run(cleanUser, hashedPassword, finalDisplayName, avatar || '', role, '', now);
+
         return role;
     });
 
@@ -80,20 +83,6 @@ async function registerUser(username, password, displayName, avatar) {
         }
         throw err;
     }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const now = Date.now();
-    const finalDisplayName = (displayName || cleanUser).trim().slice(0, 30);
-
-    stmtRegister.run(
-        cleanUser,
-        hashedPassword,
-        finalDisplayName,
-        avatar || '',
-        role,
-        '',
-        now
-    );
 
     return {
         username: cleanUser,

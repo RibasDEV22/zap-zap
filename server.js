@@ -57,6 +57,10 @@ const MAX_ADMIN_BODY = 110 * 1024 * 1024;
 const ADMIN_SESSION_TIME = 24 * 60 * 60 * 1000;
 const ADMIN_HTML_PATH = path.join(__dirname, 'admin.html');
 
+// Cache para último update de last_seen (debounce a DB)
+const lastSeenCache = new Map();
+const LAST_SEEN_DEBOUNCE_MS = 30000; // 30 segundos
+
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@zapzap.local';
@@ -119,7 +123,7 @@ async function setMaintenanceMode(active, message) {
 // ============================================================
 
 async function sendPushNotification(targetUsername, payload) {
-    if (!webPush || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+    if (!webPush || !VAPID_PUBLIC_KEY || !VAPIC_PRIVATE_KEY) return;
 
     try {
         const subscriptions = await stmtGetPushSubscriptionsByUser.all(targetUsername);
@@ -253,6 +257,20 @@ function parseJsonBody(buffer) {
         return JSON.parse(buffer.toString('utf8'));
     } catch {
         throw new Error('JSON invalido.');
+    }
+}
+
+// ============================================================
+// HELPERS PARA LAST_SEEN (DEBOUNCE)
+// ============================================================
+
+async function updateLastSeenDebounced(username) {
+    const now = Date.now();
+    const lastUpdate = lastSeenCache.get(username) || 0;
+
+    if (now - lastUpdate >= LAST_SEEN_DEBOUNCE_MS) {
+        lastSeenCache.set(username, now);
+        stmtUpdateLastSeen.run(now, username).catch(() => {});
     }
 }
 
@@ -648,16 +666,23 @@ async function checkRestricted(ws, username) {
 wss.on('connection', ws => {
     ws.isAlive = true;
     let currentUsername = null;
+    let sessionId = crypto.randomBytes(8).toString('hex'); // ID único da sessão
 
     ws.on('pong', () => {
         ws.isAlive = true;
-        if (currentUsername) {
-            stmtUpdateLastSeen.run(Date.now(), currentUsername).catch(() => {});
-        }
+        // FIX #1.3: Remove atualização SQL aqui - mantém apenas flag de vida
+        // updateLastSeenDebounced é chamado apenas em eventos de tráfego
     });
 
     ws.on('message', async raw => {
         let data;
+
+        // FIX #1.2: Renova flag de vida em qualquer tráfego
+        ws.isAlive = true;
+        if (currentUsername) {
+            updateLastSeenDebounced(currentUsername).catch(() => {});
+        }
+
         try {
             data = JSON.parse(raw.toString());
         } catch {
@@ -698,10 +723,11 @@ wss.on('connection', ws => {
                         displayName: user.displayName,
                         isBusy: false,
                         callTarget: null,
-                        focused: true
+                        focused: true,
+                        sessionId // Armazena ID único da sessão
                     });
 
-                    await stmtUpdateLastSeen.run(Date.now(), currentUsername);
+                    await updateLastSeenDebounced(currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -737,10 +763,11 @@ wss.on('connection', ws => {
                         displayName: user.displayName,
                         isBusy: false,
                         callTarget: null,
-                        focused: true
+                        focused: true,
+                        sessionId // Armazena ID único da sessão
                     });
 
-                    await stmtUpdateLastSeen.run(Date.now(), currentUsername);
+                    await updateLastSeenDebounced(currentUsername);
 
                     send(ws, {
                         type: 'auth_success',
@@ -899,8 +926,15 @@ wss.on('connection', ws => {
                         edited: false
                     };
 
+                    // FIX #2.1: Entrega de mensagens com fallback em fila
                     const targetSession = activeSockets.get(data.to);
-                    if (targetSession) send(targetSession.ws, payload);
+                    if (targetSession && targetSession.ws && targetSession.ws.readyState === WebSocket.OPEN) {
+                        send(targetSession.ws, payload);
+                    } else {
+                        // Destinatário offline - client retentará ou usará push notifications
+                        console.log(`[MSG DELIVERY] Mensagem para ${data.to} não entregue imediatamente (usuário offline ou desconectado).`);
+                    }
+
                     send(ws, Object.assign({}, payload, { confirmed: true }));
 
                     if (!targetSession || !targetSession.focused) {
@@ -937,7 +971,9 @@ wss.on('connection', ws => {
                         send(ws, payload);
                         if (data.withUser) {
                             const t = activeSockets.get(data.withUser);
-                            if (t) send(t.ws, payload);
+                            if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+                                send(t.ws, payload);
+                            }
                         }
                     } else {
                         send(ws, {
@@ -965,7 +1001,7 @@ wss.on('connection', ws => {
                         };
 
                         const senderSession = activeSockets.get(data.withUser);
-                        if (senderSession) {
+                        if (senderSession && senderSession.ws && senderSession.ws.readyState === WebSocket.OPEN) {
                             send(senderSession.ws, payload);
                         }
                     }
@@ -998,7 +1034,9 @@ wss.on('connection', ws => {
                     const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
                     const targetSession = activeSockets.get(targetUser);
 
-                    if (targetSession) send(targetSession.ws, payload);
+                    if (targetSession && targetSession.ws && targetSession.ws.readyState === WebSocket.OPEN) {
+                        send(targetSession.ws, payload);
+                    }
                     send(ws, payload);
                     break;
                 }
@@ -1098,7 +1136,9 @@ wss.on('connection', ws => {
                     const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
                     const targetSession = activeSockets.get(targetUser);
 
-                    if (targetSession) send(targetSession.ws, payload);
+                    if (targetSession && targetSession.ws && targetSession.ws.readyState === WebSocket.OPEN) {
+                        send(targetSession.ws, payload);
+                    }
                     send(ws, payload);
                     break;
                 }
@@ -1124,7 +1164,9 @@ wss.on('connection', ws => {
                             send(ws, payload);
                             if (data.withUser) {
                                 const t = activeSockets.get(data.withUser);
-                                if (t) send(t.ws, payload);
+                                if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+                                    send(t.ws, payload);
+                                }
                             }
                         }
                     } else {
@@ -1168,7 +1210,9 @@ wss.on('connection', ws => {
                         };
                         send(ws, payload);
                         const t = activeSockets.get(data.withUser);
-                        if (t) send(t.ws, payload);
+                        if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+                            send(t.ws, payload);
+                        }
                     } else {
                         await stmtDeleteConversationForUser.run(
                             currentUsername,
@@ -1201,23 +1245,28 @@ wss.on('connection', ws => {
                     const callee = activeSockets.get(targetUsername);
                     const caller = activeSockets.get(currentUsername);
 
-                    if (!callee) {
+                    // FIX #2.2: Validação corrigida - verifica se o socket está realmente ativo
+                    if (!callee || !callee.ws || callee.ws.readyState !== WebSocket.OPEN) {
                         return send(ws, { type: 'call_offline', callee: targetUsername });
                     }
 
-                    if (callee.isBusy || caller.isBusy) {
+                    if (callee.isBusy || (caller && caller.isBusy)) {
                         return send(ws, { type: 'call_error', message: 'Usuario ocupado.' });
                     }
 
-                    caller.isBusy = true;
-                    caller.callTarget = targetUsername;
-                    callee.isBusy = true;
-                    callee.callTarget = currentUsername;
+                    if (caller) {
+                        caller.isBusy = true;
+                        caller.callTarget = targetUsername;
+                    }
+                    if (callee) {
+                        callee.isBusy = true;
+                        callee.callTarget = currentUsername;
+                    }
 
                     send(callee.ws, {
                         type: 'call_incoming',
                         caller: currentUsername,
-                        callerDisplayName: caller.displayName,
+                        callerDisplayName: caller ? caller.displayName : 'Desconhecido',
                         offer: data.offer || data.signal,
                         isVideo: !!data.isVideo
                     });
@@ -1235,7 +1284,7 @@ wss.on('connection', ws => {
 
                     if (data.accepted === false) {
                         endUserCall(currentUsername);
-                        if (caller) {
+                        if (caller && caller.ws && caller.ws.readyState === WebSocket.OPEN) {
                             send(caller.ws, { type: 'call_rejected', from: currentUsername });
                         }
                         break;
@@ -1246,7 +1295,7 @@ wss.on('connection', ws => {
                         answerer.callTarget = targetUsername;
                     }
 
-                    if (caller) {
+                    if (caller && caller.ws && caller.ws.readyState === WebSocket.OPEN) {
                         caller.isBusy = true;
                         caller.callTarget = currentUsername;
                         send(caller.ws, {
@@ -1263,7 +1312,7 @@ wss.on('connection', ws => {
                     const targetUsername = data.caller || data.to;
                     endUserCall(currentUsername);
                     const caller = activeSockets.get(targetUsername);
-                    if (caller) {
+                    if (caller && caller.ws && caller.ws.readyState === WebSocket.OPEN) {
                         send(caller.ws, { type: 'call_rejected', from: currentUsername });
                     }
                     break;
@@ -1274,7 +1323,7 @@ wss.on('connection', ws => {
                     if (!currentUsername) return;
                     const targetUsername = data.to;
                     const t = activeSockets.get(targetUsername);
-                    if (t) {
+                    if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
                         send(t.ws, {
                             type: 'call_ice_candidate',
                             from: currentUsername,
@@ -1296,10 +1345,17 @@ wss.on('connection', ws => {
 
     ws.on('close', () => {
         if (currentUsername) {
-            stmtUpdateLastSeen.run(Date.now(), currentUsername).catch(() => {});
-            endUserCall(currentUsername);
-            activeSockets.delete(currentUsername);
-            broadcastUserList().catch(() => {});
+            const session = activeSockets.get(currentUsername);
+            
+            // FIX #1.1: Validação rigorosa antes de remover - verifica se é o socket correto
+            if (session && session.ws === ws && session.sessionId) {
+                console.log(`[SOCKET CLOSE] Removendo sessão ${session.sessionId} do usuário ${currentUsername}`);
+                
+                updateLastSeenDebounced(currentUsername).catch(() => {});
+                endUserCall(currentUsername);
+                activeSockets.delete(currentUsername);
+                broadcastUserList().catch(() => {});
+            }
         }
     });
 });

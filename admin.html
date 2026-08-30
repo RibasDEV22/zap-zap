@@ -8,37 +8,41 @@
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b141a; color: #e9edef; margin: 0; padding: 20px; }
         .container { max-width: 1100px; margin: 0 auto; }
-        h1, h2 { color: #00a884; margin-top: 0; }
+        h1, h2, h3 { color: #00a884; margin-top: 0; }
         .card { background: #111b21; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #222d34; }
         input, textarea, button, select { background: #2a3942; color: #fff; border: 1px solid #3b4a54; padding: 10px; border-radius: 4px; font-size: 14px; }
         input[type="text"], input[type="password"] { width: 100%; }
-        button { background: #00a884; border: none; cursor: pointer; font-weight: bold; padding: 10px 15px; }
+        button { background: #00a884; border: none; cursor: pointer; font-weight: bold; padding: 10px 15px; color: #fff; border-radius: 4px; }
         button:hover { background: #008f6f; }
         button.danger { background: #ea0038; }
         button.danger:hover { background: #c2002e; }
+        button.warning { background: #e5a100; color: #111; }
+        button.warning:hover { background: #c48900; }
         button.secondary { background: #3b4a54; }
         button.secondary:hover { background: #4a5b66; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #222d34; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #222d34; vertical-align: middle; }
         th { background: #202c33; color: #8696a0; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; display: inline-block; }
         .badge-active { background: #00a884; color: #fff; }
         .badge-inactive { background: #ea0038; color: #fff; }
+        .badge-restricted { background: #e5a100; color: #111; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
         .stat-box { background: #202c33; padding: 15px; border-radius: 6px; text-align: center; }
         .stat-box .number { font-size: 24px; font-weight: bold; color: #00a884; }
+        .actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
         
-        /* Modal de Login */
-        #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 20, 26, 0.95); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-        .login-card { background: #111b21; padding: 30px; border-radius: 8px; border: 1px solid #222d34; width: 320px; text-align: center; }
+        /* Overlays e Modais */
+        .overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 20, 26, 0.90); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal-card { background: #111b21; padding: 25px; border-radius: 8px; border: 1px solid #222d34; width: 360px; max-width: 90%; }
         .hidden { display: none !important; }
     </style>
 </head>
 <body>
 
     <!-- OVERLAY DE LOGIN -->
-    <div id="loginOverlay">
-        <div class="login-card">
+    <div id="loginOverlay" class="overlay">
+        <div class="modal-card" style="text-align: center;">
             <h2>Acesso Restrito</h2>
             <p style="color: #8696a0; font-size: 13px;">Digite a senha administrativa para continuar.</p>
             <form onsubmit="handleLogin(event)">
@@ -46,6 +50,49 @@
                 <button type="submit" style="width: 100%;">Entrar no Painel</button>
             </form>
             <p id="loginError" style="color: #ea0038; font-size: 13px; margin-top: 10px;" class="hidden"></p>
+        </div>
+    </div>
+
+    <!-- MODAL EDITAR PERFIL -->
+    <div id="editUserModal" class="overlay hidden">
+        <div class="modal-card">
+            <h3>Editar Perfil de Usuário</h3>
+            <p style="color: #8696a0; font-size: 12px; margin-bottom: 15px;">Alterando conta de <b id="editUsernameLabel"></b></p>
+            <form onsubmit="handleSaveUserProfile(event)">
+                <input type="hidden" id="editUsername">
+                <label style="font-size: 12px; color: #8696a0;">Nome de Exibição:</label>
+                <input type="text" id="editDisplayName" required style="margin-bottom: 12px; margin-top: 4px;">
+                
+                <label style="font-size: 12px; color: #8696a0;">Avatar (URL ou Base64):</label>
+                <input type="text" id="editAvatar" style="margin-bottom: 15px; margin-top: 4px;" placeholder="https://... ou data:image/...">
+                
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" class="secondary" onclick="closeEditUserModal()">Cancelar</button>
+                    <button type="submit">Salvar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL RESTRIÇÃO / MUTE -->
+    <div id="restrictModal" class="overlay hidden">
+        <div class="modal-card">
+            <h3>Restringir Usuário</h3>
+            <p style="color: #8696a0; font-size: 12px; margin-bottom: 15px;">Aplicar restrição temporária para <b id="restrictUsernameLabel"></b></p>
+            <input type="hidden" id="restrictUsername">
+            
+            <label style="font-size: 12px; color: #8696a0;">Duração da Restrição:</label>
+            <select id="restrictDuration" style="width: 100%; margin-bottom: 15px; margin-top: 4px;">
+                <option value="3600000">1 Hora</option>
+                <option value="86400000">24 Horas</option>
+                <option value="604800000">7 Dias</option>
+                <option value="0">Remover Restrição (Desbloquear)</option>
+            </select>
+            
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button type="button" class="secondary" onclick="closeRestrictModal()">Cancelar</button>
+                <button type="button" class="warning" onclick="applyUserRestriction()">Aplicar</button>
+            </div>
         </div>
     </div>
 
@@ -118,6 +165,7 @@
                         <th>Usuário</th>
                         <th>Nome Exibição</th>
                         <th>Cargo</th>
+                        <th>Visto por Último</th>
                         <th>Status</th>
                         <th>Ações</th>
                     </tr>
@@ -129,16 +177,19 @@
         <!-- BACKUP E RESTAURAÇÃO -->
         <div class="card">
             <h2>Backup & Restauração do Banco</h2>
-            <div style="display: flex; gap: 15px; align-items: center;">
+            <p style="color: #8696a0; font-size: 13px; margin-bottom: 12px;">Faça o download ou restaure o arquivo de banco de dados SQLite (.db).</p>
+            <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
                 <button onclick="downloadBackup()">Baixar Backup (.db)</button>
-                <div style="border-left: 1px solid #222d34; height: 30px;"></div>
-                <input type="file" id="restoreFile" accept=".db" style="width: auto;">
+                <div style="border-left: 1px solid #222d34; height: 30px;" class="hidden-mobile"></div>
+                <input type="file" id="restoreFile" accept=".db, application/octet-stream" style="width: auto;">
                 <button class="danger" onclick="restoreBackup()">Restaurar Backup</button>
             </div>
         </div>
     </div>
 
     <script>
+        let autoRefreshTimer = null;
+
         // --- AUTENTICAÇÃO ---
         async function handleLogin(e) {
             e.preventDefault();
@@ -150,6 +201,7 @@
                 const res = await fetch('/admin/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
                     body: JSON.stringify({ password })
                 });
                 const data = await res.json();
@@ -158,6 +210,7 @@
                     document.getElementById('loginOverlay').classList.add('hidden');
                     document.getElementById('dashboard').classList.remove('hidden');
                     loadDashboard();
+                    startAutoRefresh();
                 } else {
                     errEl.innerText = data.error || 'Erro ao autenticar.';
                     errEl.classList.remove('hidden');
@@ -169,17 +222,27 @@
         }
 
         async function handleLogout() {
-            await fetch('/admin/api/logout', { method: 'POST' });
+            await fetch('/admin/api/logout', { method: 'POST', credentials: 'include' });
             location.reload();
         }
 
+        function startAutoRefresh() {
+            if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+            autoRefreshTimer = setInterval(() => {
+                if (!document.getElementById('dashboard').classList.contains('hidden')) {
+                    loadDashboard(true);
+                }
+            }, 10000);
+        }
+
         // --- CARREGAMENTO INICIAL ---
-        async function loadDashboard() {
+        async function loadDashboard(isSilent = false) {
             try {
-                const res = await fetch('/admin/api/status');
+                const res = await fetch('/admin/api/status', { credentials: 'include' });
                 if (res.status === 401) {
                     document.getElementById('loginOverlay').classList.remove('hidden');
                     document.getElementById('dashboard').classList.add('hidden');
+                    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
                     return;
                 }
 
@@ -193,17 +256,19 @@
                 document.getElementById('statUsers').innerText = data.users ? data.users.length : 0;
                 document.getElementById('statUptime').innerText = formatUptime(data.uptime);
 
-                // Manutenção
-                document.getElementById('maintActive').checked = !!data.maintenance.active;
-                document.getElementById('maintMsg').value = data.maintenance.message || '';
+                // Manutenção (apenas se não for atualização silenciosa)
+                if (!isSilent && data.maintenance) {
+                    document.getElementById('maintActive').checked = !!data.maintenance.active;
+                    document.getElementById('maintMsg').value = data.maintenance.message || '';
+                }
 
                 // Usuários
                 renderUsers(data.users || []);
 
                 // Anúncios
-                loadAnnouncements();
+                if (!isSilent) loadAnnouncements();
             } catch (err) {
-                console.error('Erro ao carregar o painel:', err);
+                if (!isSilent) console.error('Erro ao carregar o painel:', err);
             }
         }
 
@@ -215,6 +280,7 @@
             const res = await fetch('/admin/api/maintenance', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ active, message })
             });
 
@@ -224,7 +290,7 @@
 
         // --- RECADOS ---
         async function loadAnnouncements() {
-            const res = await fetch('/admin/api/announcements');
+            const res = await fetch('/admin/api/announcements', { credentials: 'include' });
             const data = await res.json();
             if (data.success) {
                 renderAnnouncements(data.items || []);
@@ -239,6 +305,7 @@
             const res = await fetch('/admin/api/announcements', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ message })
             });
 
@@ -254,6 +321,7 @@
             const res = await fetch('/admin/api/announcements/deactivate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ id })
             });
 
@@ -286,24 +354,39 @@
         function renderUsers(users) {
             const tbody = document.getElementById('usersTable');
             tbody.innerHTML = '';
+            const now = Date.now();
+
             users.forEach(u => {
                 const isBanned = !!u.banned;
-                const statusBadge = isBanned 
-                    ? '<span class="badge badge-inactive">Banido</span>' 
-                    : '<span class="badge badge-active">Ativo</span>';
+                const restrictedUntil = Number(u.restrictedUntil) || 0;
+                const isRestricted = restrictedUntil > now;
+
+                let statusBadge = '<span class="badge badge-active">Ativo</span>';
+                if (isBanned) {
+                    statusBadge = '<span class="badge badge-inactive">Banido</span>';
+                } else if (isRestricted) {
+                    statusBadge = `<span class="badge badge-restricted" title="Restrito até ${new Date(restrictedUntil).toLocaleString('pt-BR')}">Restrito</span>`;
+                }
+
+                const lastSeenStr = u.last_seen ? new Date(u.last_seen).toLocaleString('pt-BR') : 'Nunca';
 
                 tbody.innerHTML += `
                     <tr>
                         <td><b>@${escapeHtml(u.username)}</b></td>
                         <td>${escapeHtml(u.displayName)}</td>
                         <td>${escapeHtml(u.role)}</td>
+                        <td>${lastSeenStr}</td>
                         <td>${statusBadge}</td>
                         <td>
-                            ${u.role !== 'Criador' ? `
-                                <button class="${isBanned ? '' : 'danger'}" onclick="toggleBan('${u.username}', ${!isBanned})">
-                                    ${isBanned ? 'Desbanir' : 'Banir'}
-                                </button>
-                            ` : '<i>Protegido</i>'}
+                            <div class="actions-cell">
+                                <button class="secondary" onclick="openEditUserModal('${u.username}', '${escapeHtml(u.displayName)}', '${escapeHtml(u.avatar || '')}')">Editar</button>
+                                ${u.role !== 'Criador' ? `
+                                    <button class="${isBanned ? '' : 'danger'}" onclick="toggleBan('${u.username}', ${!isBanned})">
+                                        ${isBanned ? 'Desbanir' : 'Banir'}
+                                    </button>
+                                    <button class="warning" onclick="openRestrictModal('${u.username}')">Restringir</button>
+                                ` : '<i>Protegido</i>'}
+                            </div>
                         </td>
                     </tr>
                 `;
@@ -316,11 +399,69 @@
             const res = await fetch('/admin/api/user/moderation', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({ username, banned: banStatus })
             });
 
             if (res.ok) loadDashboard();
             else alert('Falha ao alterar status do usuário.');
+        }
+
+        function openRestrictModal(username) {
+            document.getElementById('restrictUsername').value = username;
+            document.getElementById('restrictUsernameLabel').innerText = '@' + username;
+            document.getElementById('restrictModal').classList.remove('hidden');
+        }
+
+        function closeRestrictModal() {
+            document.getElementById('restrictModal').classList.add('hidden');
+        }
+
+        async function applyUserRestriction() {
+            const username = document.getElementById('restrictUsername').value;
+            const duration = Number(document.getElementById('restrictDuration').value);
+            const restrictedUntil = duration > 0 ? Date.now() + duration : 0;
+
+            const res = await fetch('/admin/api/user/moderation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ username, banned: false, restrictedUntil })
+            });
+
+            closeRestrictModal();
+            if (res.ok) loadDashboard();
+            else alert('Falha ao aplicar restrição.');
+        }
+
+        function openEditUserModal(username, displayName, avatar) {
+            document.getElementById('editUsername').value = username;
+            document.getElementById('editUsernameLabel').innerText = '@' + username;
+            document.getElementById('editDisplayName').value = displayName;
+            document.getElementById('editAvatar').value = avatar;
+            document.getElementById('editUserModal').classList.remove('hidden');
+        }
+
+        function closeEditUserModal() {
+            document.getElementById('editUserModal').classList.add('hidden');
+        }
+
+        async function handleSaveUserProfile(e) {
+            e.preventDefault();
+            const username = document.getElementById('editUsername').value;
+            const displayName = document.getElementById('editDisplayName').value;
+            const avatar = document.getElementById('editAvatar').value;
+
+            const res = await fetch('/admin/api/user/profile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ username, displayName, avatar })
+            });
+
+            closeEditUserModal();
+            if (res.ok) loadDashboard();
+            else alert('Falha ao atualizar perfil do usuário.');
         }
 
         // --- BACKUP & RESTORE ---
@@ -335,24 +476,31 @@
             if (!confirm('ATENÇÃO: A restauração substituirá todas as mensagens e contas atuais! Continuar?')) return;
 
             const file = fileInput.files[0];
-            const res = await fetch('/admin/api/restore', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-sqlite3' },
-                body: file
-            });
+            
+            try {
+                const res = await fetch('/admin/api/restore', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-sqlite3' },
+                    credentials: 'include',
+                    body: file
+                });
 
-            if (res.ok) {
-                alert('Banco de dados restaurado com sucesso!');
-                loadDashboard();
-            } else {
-                const data = await res.json();
-                alert('Erro na restauração: ' + (data.error || 'Arquivo inválido.'));
+                if (res.ok) {
+                    alert('Banco de dados restaurado com sucesso! Os usuários ativos foram desconectados.');
+                    fileInput.value = '';
+                    loadDashboard();
+                } else {
+                    const data = await res.json();
+                    alert('Erro na restauração: ' + (data.error || 'Arquivo inválido ou não autorizado.'));
+                }
+            } catch (err) {
+                alert('Erro ao enviar arquivo para o servidor: ' + err.message);
             }
         }
 
         // --- UTILITÁRIOS ---
         function escapeHtml(str) {
-            return String(str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            return String(str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
         }
 
         function formatUptime(seconds) {
@@ -361,7 +509,7 @@
             return `${h}h ${m}m`;
         }
 
-        // Tentar verificar sessão no boot
+        // Execução inicial
         loadDashboard();
     </script>
 </body>

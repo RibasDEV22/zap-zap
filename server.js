@@ -1126,6 +1126,33 @@ wss.on('connection', ws => {
                     break;
                 }
 
+
+
+                    // --------------------
+// REMOVE REACTION
+// --------------------
+case 'remove_reaction': {
+    if (!currentUsername || !data.messageId) return;
+
+    const msg = stmtGetMessageById.get(data.messageId);
+    if (!msg || (msg.sender !== currentUsername && msg.receiver !== currentUsername)) return;
+
+    stmtRemoveReaction.run(data.messageId, currentUsername);
+
+    const payload = {
+        type: 'reaction_removed',
+        messageId: data.messageId,
+        username: currentUsername
+    };
+
+    const targetUser = msg.sender === currentUsername ? msg.receiver : msg.sender;
+    const targetSession = activeSockets.get(targetUser);
+
+    if (targetSession) send(targetSession.ws, payload);
+    send(ws, payload);
+    break;
+}
+                    
                 // --------------------
                 // DELETE MESSAGE
                 // --------------------

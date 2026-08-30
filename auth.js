@@ -48,34 +48,28 @@ async function registerUser(username, password, displayName, avatar) {
         throw new AuthError('Foto de perfil muito grande. Escolha uma imagem menor.');
     }
 
-    // bcrypt.hash é a única parte assíncrona — precisa acontecer ANTES
-    // da transação, para que checagem + insert fiquem 100% atômicos.
+    // Checagem assíncrona no Turso
+    const existing = await stmtGetUser.get(cleanUser);
+    if (existing) {
+        throw new AuthError('Este nome de usuario ja esta em uso.');
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const now = Date.now();
     const finalDisplayName = (displayName || cleanUser).trim().slice(0, 30);
 
-    const registerTx = db.transaction(() => {
-        const existing = stmtGetUser.get(cleanUser);
-        if (existing) {
-            throw new AuthError('Este nome de usuario ja esta em uso.');
-        }
+    // Consulta de contagem assíncrona no Turso
+    const userCountRes = await db.execute('SELECT count(*) as count FROM users');
+    const userCount = Number(userCountRes.rows[0].count);
 
-        const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
+    const role = userCount === 0
+        ? 'Criador'
+        : cleanUser === 'admin'
+            ? 'Admin'
+            : 'Membro';
 
-        const role = userCount === 0
-            ? 'Criador'
-            : cleanUser === 'admin'
-                ? 'Admin'
-                : 'Membro';
-
-        stmtRegister.run(cleanUser, hashedPassword, finalDisplayName, avatar || '', role, '', now);
-
-        return role;
-    });
-
-    let role;
     try {
-        role = registerTx();
+        await stmtRegister.run(cleanUser, hashedPassword, finalDisplayName, avatar || '', role, '', now);
     } catch (err) {
         if (err instanceof AuthError) throw err;
         if (err.message && err.message.includes('UNIQUE')) {
@@ -102,7 +96,8 @@ async function authenticateUser(username, password) {
         throw new AuthError('Informe usuario e senha.');
     }
 
-    const user = stmtGetUser.get(cleanUser);
+    // Adicionado 'await' necessário para a consulta no Turso
+    const user = await stmtGetUser.get(cleanUser);
     if (!user) {
         throw new AuthError('Usuario ou senha incorretos.');
     }

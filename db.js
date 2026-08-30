@@ -49,7 +49,8 @@ db.exec(`
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         message TEXT NOT NULL,
         createdBy TEXT NOT NULL,
-        createdAt INTEGER NOT NULL
+        createdAt INTEGER NOT NULL,
+        active INTEGER DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS system_settings (
@@ -62,6 +63,9 @@ db.exec(`
 
     CREATE INDEX IF NOT EXISTS idx_messages_ts
         ON messages(timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_announcements_active
+        ON announcements(active, createdAt);
 `);
 
 // ============================================================
@@ -103,6 +107,15 @@ try {
     addCol('deleted_for_all', 'INTEGER DEFAULT 0');
     addCol('reply_to', 'INTEGER');
     addCol('edited', 'INTEGER DEFAULT 0');
+
+    const announcementCols = db
+        .prepare('PRAGMA table_info(announcements)')
+        .all()
+        .map(c => c.name);
+
+    if (!announcementCols.includes('active')) {
+        db.exec(`ALTER TABLE announcements ADD COLUMN active INTEGER DEFAULT 1`);
+    }
 
 } catch (err) {
     console.warn('[DB] Migration:', err.message);
@@ -302,14 +315,22 @@ const stmtEditMessage = db.prepare(`
 // ============================================================
 
 const stmtGetAnnouncements = db.prepare(`
-    SELECT id, message, createdAt
+    SELECT id, message, createdBy, createdAt, active
     FROM announcements
+    WHERE active = 1
     ORDER BY createdAt DESC
+    LIMIT 20
 `);
 
 const stmtInsertAnnouncement = db.prepare(`
-    INSERT INTO announcements (message, createdBy, createdAt)
-    VALUES (?, ?, ?)
+    INSERT INTO announcements (message, createdBy, createdAt, active)
+    VALUES (?, ?, ?, 1)
+`);
+
+const stmtDeactivateAnnouncement = db.prepare(`
+    UPDATE announcements
+    SET active = 0
+    WHERE id = ?
 `);
 
 const stmtDeleteAnnouncement = db.prepare(`
@@ -534,6 +555,7 @@ module.exports = {
     stmtEditMessage,
     stmtGetAnnouncements,
     stmtInsertAnnouncement,
+    stmtDeactivateAnnouncement,
     stmtDeleteAnnouncement,
     stmtGetSetting,
     stmtSetSetting,

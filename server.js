@@ -23,7 +23,7 @@ const {
     stmtEditMessage,
     stmtGetAnnouncements,
     stmtInsertAnnouncement,
-    stmtDeleteAnnouncement,
+    stmtDeactivateAnnouncement,
     stmtGetSetting,
     stmtSetSetting,
     db,
@@ -71,7 +71,7 @@ function setMaintenanceMode(active, message) {
     stmtSetSetting.run('maintenance', JSON.stringify(maintenanceState));
 
     if (maintenanceState.active) {
-        // Opção B: Derruba imediatamente os sockets conectados de não-staff
+        // Encerra imediatamente as conexões ativas de membros comuns
         for (const [username, session] of activeSockets.entries()) {
             if (!isStaff(username)) {
                 send(session.ws, {
@@ -268,6 +268,80 @@ async function handleAdminRequest(req, res, pathname) {
             database: dbPath,
             maintenance: maintenanceState
         });
+    }
+
+    if (pathname === '/admin/api/maintenance' && req.method === 'POST') {
+        try {
+            const body = parseJsonBody(await readBody(req, 32 * 1024));
+            setMaintenanceMode(body.active, body.message);
+            return sendJson(res, 200, {
+                success: true,
+                maintenance: maintenanceState
+            });
+        } catch (err) {
+            return sendJson(res, 400, { error: err.message });
+        }
+    }
+
+    if (pathname === '/admin/api/announcements' && req.method === 'GET') {
+        const items = stmtGetAnnouncements.all();
+        return sendJson(res, 200, { success: true, items });
+    }
+
+    if (pathname === '/admin/api/announcements' && req.method === 'POST') {
+        try {
+            const body = parseJsonBody(await readBody(req, 64 * 1024));
+            const msg = String(body.message || '').trim().slice(0, 1000);
+            if (!msg) return sendJson(res, 400, { error: 'Mensagem vazia.' });
+
+            const now = Date.now();
+            const info = stmtInsertAnnouncement.run(msg, 'Admin', now);
+
+            const payloadStr = JSON.stringify({
+                type: 'announcement_new',
+                id: info.lastInsertRowid,
+                message: msg,
+                createdAt: now
+            });
+
+            for (const session of activeSockets.values()) {
+                if (session.ws.readyState === WebSocket.OPEN) {
+                    session.ws.send(payloadStr);
+                }
+            }
+
+            return sendJson(res, 200, {
+                success: true,
+                id: info.lastInsertRowid
+            });
+        } catch (err) {
+            return sendJson(res, 400, { error: err.message });
+        }
+    }
+
+    if (pathname === '/admin/api/announcements/deactivate' && req.method === 'POST') {
+        try {
+            const body = parseJsonBody(await readBody(req, 16 * 1024));
+            const id = Number(body.id);
+            if (!id) return sendJson(res, 400, { error: 'ID invalido.' });
+
+            stmtDeactivateAnnouncement.run(id);
+
+            const payloadStr = JSON.stringify({
+                type: 'announcement_removed',
+                id
+            });
+
+            for (const session of activeSockets.values()) {
+                if (session.ws.readyState === WebSocket.OPEN) {
+                    session.ws.send(payloadStr);
+                }
+            }
+
+            return sendJson(res, 200, { success: true, id });
+        } catch (err) {
+            return sendJson(res, 400, { error: err.message });
+        }
     }
 
     if (pathname === '/admin/api/user/moderation' && req.method === 'POST') {
@@ -595,7 +669,6 @@ wss.on('connection', ws => {
                 case 'login': {
                     const user = await authenticateUser(data.username, data.password);
 
-                    // Gate do Modo Manutenção
                     if (maintenanceState.active && !isStaff(user.username)) {
                         return send(ws, {
                             type: 'maintenance_active',
@@ -641,7 +714,6 @@ wss.on('connection', ws => {
                         data.avatar
                     );
 
-                    // Gate do Modo Manutenção
                     if (maintenanceState.active && !isStaff(user.username)) {
                         return send(ws, {
                             type: 'maintenance_active',
@@ -668,9 +740,8 @@ wss.on('connection', ws => {
                 }
 
                 // --------------------
-                // ANNOUNCEMENTS & MAINTENANCE (PASSO 2)
+                // ANNOUNCEMENTS & MAINTENANCE (WS CLIENT QUERY)
                 // --------------------
-
                 case 'get_announcements': {
                     const items = stmtGetAnnouncements.all();
                     send(ws, {
@@ -680,57 +751,11 @@ wss.on('connection', ws => {
                     break;
                 }
 
-                case 'admin_send_announcement': {
-                    if (!currentUsername || !isStaff(currentUsername)) return;
-                    const msg = String(data.message || '').trim().slice(0, 1000);
-                    if (!msg) return;
-
-                    const now = Date.now();
-                    const info = stmtInsertAnnouncement.run(msg, currentUsername, now);
-
-                    const payloadStr = JSON.stringify({
-                        type: 'announcement_new',
-                        id: info.lastInsertRowid,
-                        message: msg,
-                        createdAt: now
-                    });
-
-                    for (const session of activeSockets.values()) {
-                        if (session.ws.readyState === WebSocket.OPEN) {
-                            session.ws.send(payloadStr);
-                        }
-                    }
-                    break;
-                }
-
-                case 'admin_delete_announcement': {
-                    if (!currentUsername || !isStaff(currentUsername) || !data.id) return;
-                    stmtDeleteAnnouncement.run(data.id);
-
-                    const payloadStr = JSON.stringify({
-                        type: 'announcement_removed',
-                        id: data.id
-                    });
-
-                    for (const session of activeSockets.values()) {
-                        if (session.ws.readyState === WebSocket.OPEN) {
-                            session.ws.send(payloadStr);
-                        }
-                    }
-                    break;
-                }
-
                 case 'get_maintenance_status': {
                     send(ws, {
                         type: 'maintenance_status',
                         ...maintenanceState
                     });
-                    break;
-                }
-
-                case 'admin_set_maintenance': {
-                    if (!currentUsername || !isStaff(currentUsername)) return;
-                    setMaintenanceMode(data.active, data.message);
                     break;
                 }
 

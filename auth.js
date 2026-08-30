@@ -21,9 +21,9 @@ function validateCredentials(username, password) {
         );
     }
 
-    if (!password || password.length < 4) {
+    if (typeof password !== 'string' || password.length < 6) {
         throw new AuthError(
-            'A senha deve ter no minimo 4 caracteres.'
+            'A senha deve ter no minimo 6 caracteres.'
         );
     }
 
@@ -34,71 +34,56 @@ function getRestrictionInfo(user) {
     const now = Date.now();
 
     if (user.banned) {
-        throw new AuthError(
-            'Esta conta foi banida.'
-        );
+        throw new AuthError('Esta conta foi banida.');
     }
 
-    const restrictedUntil =
-        Number(user.restrictedUntil) || 0;
+    const restrictedUntil = Number(user.restrictedUntil) || 0;
 
     return {
         restricted: restrictedUntil > now,
-        restrictedUntil:
-            restrictedUntil > now
-                ? restrictedUntil
-                : 0
+        restrictedUntil: restrictedUntil > now ? restrictedUntil : 0
     };
 }
 
-async function registerUser(
-    username,
-    password,
-    displayName,
-    avatar
-) {
-    const cleanUser =
-        validateCredentials(username, password);
+async function registerUser(username, password, displayName, avatar) {
+    const cleanUser = validateCredentials(username, password);
 
-    if (
-        avatar &&
-        avatar.length > MAX_AVATAR_SIZE
-    ) {
-        throw new AuthError(
-            'Foto de perfil muito grande. Escolha uma imagem menor.'
-        );
+    if (avatar && avatar.length > MAX_AVATAR_SIZE) {
+        throw new AuthError('Foto de perfil muito grande. Escolha uma imagem menor.');
     }
 
-    const existing =
-        stmtGetUser.get(cleanUser);
+    // Usando Transação atômica para evitar Race Condition na definição do Criador
+    const registerTx = db.transaction(() => {
+        const existing = stmtGetUser.get(cleanUser);
+        if (existing) {
+            throw new AuthError('Este nome de usuario ja esta em uso.');
+        }
 
-    if (existing) {
-        throw new AuthError(
-            'Este nome de usuario ja esta em uso.'
-        );
-    }
+        const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
 
-    const userCount =
-        db.prepare(
-            'SELECT count(*) as count FROM users'
-        ).get().count;
-
-    const role =
-        userCount === 0
+        const role = userCount === 0
             ? 'Criador'
             : cleanUser === 'admin'
                 ? 'Admin'
                 : 'Membro';
 
-    const hashedPassword =
-        await bcrypt.hash(password, 10);
+        return role;
+    });
 
+    let role;
+    try {
+        role = registerTx();
+    } catch (err) {
+        if (err instanceof AuthError) throw err;
+        if (err.message && err.message.includes('UNIQUE')) {
+            throw new AuthError('Este nome de usuario ja esta em uso.');
+        }
+        throw err;
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
     const now = Date.now();
-
-    const finalDisplayName =
-        (displayName || cleanUser)
-            .trim()
-            .slice(0, 30);
+    const finalDisplayName = (displayName || cleanUser).trim().slice(0, 30);
 
     stmtRegister.run(
         cleanUser,
@@ -121,44 +106,24 @@ async function registerUser(
     };
 }
 
-async function authenticateUser(
-    username,
-    password
-) {
-    const cleanUser =
-        (username || '')
-            .toLowerCase()
-            .trim();
+async function authenticateUser(username, password) {
+    const cleanUser = (username || '').toLowerCase().trim();
 
-    if (!cleanUser || !password) {
-        throw new AuthError(
-            'Informe usuario e senha.'
-        );
+    if (!cleanUser || typeof password !== 'string' || !password) {
+        throw new AuthError('Informe usuario e senha.');
     }
 
-    const user =
-        stmtGetUser.get(cleanUser);
-
+    const user = stmtGetUser.get(cleanUser);
     if (!user) {
-        throw new AuthError(
-            'Usuario ou senha incorretos.'
-        );
+        throw new AuthError('Usuario ou senha incorretos.');
     }
 
-    const isValid =
-        await bcrypt.compare(
-            password,
-            user.password
-        );
-
+    const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
-        throw new AuthError(
-            'Usuario ou senha incorretos.'
-        );
+        throw new AuthError('Usuario ou senha incorretos.');
     }
 
-    const restriction =
-        getRestrictionInfo(user);
+    const restriction = getRestrictionInfo(user);
 
     return {
         username: user.username,
@@ -168,8 +133,7 @@ async function authenticateUser(
         bio: user.bio || '',
         banned: !!user.banned,
         restricted: restriction.restricted,
-        restrictedUntil:
-            restriction.restrictedUntil
+        restrictedUntil: restriction.restrictedUntil
     };
 }
 
